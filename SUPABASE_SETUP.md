@@ -14,7 +14,7 @@ The floating **Study Circle** widget is an opt-in community feature for Experime
 
 Open **SQL Editor**, paste the contents of `supabase-schema.sql`, and run it. The SQL enables Row Level Security (RLS): users can see listed profiles, update only their own profile, and read only messages where they are the sender or recipient. Messages can be sent only by the authenticated sender to a listed member.
 
-Then open **Database → Publications**, find `supabase_realtime`, and enable `public.direct_messages` so new messages appear without refreshing. Check the Supabase RLS policies before opening the site to visitors.
+The script also turns on Realtime for `public.direct_messages` (so new messages appear without refreshing) and adds the policies for the **typing indicator**, which uses private Realtime Broadcast channels. If you ran an older version of the script, just run this one again: it is safe to re-run and adds the new `read_at` column (unread counters / auto-mark-as-read) and the typing policies. Until it is re-run, the chat keeps working but unread badges and the typing indicator stay off. Check the Supabase RLS policies before opening the site to visitors.
 
 ## 3. Publish to GitHub Pages
 
