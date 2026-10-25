@@ -16,6 +16,10 @@ Open **SQL Editor**, paste the contents of `supabase-schema.sql`, and run it. Th
 
 The script also turns on Realtime for `public.direct_messages` (so new messages appear without refreshing) and adds the policies for the **typing indicator**, which uses private Realtime Broadcast channels. If you ran an older version of the script, just run this one again: it is safe to re-run and adds the new `read_at` column (unread counters / auto-mark-as-read) and the typing policies. Until it is re-run, the chat keeps working but unread badges and the typing indicator stay off. Check the Supabase RLS policies before opening the site to visitors.
 
+### Study groups
+
+The same script adds **group chats**: any member can create a group (up to 50 people), name it, and pick other directory members. The creator is the admin and can rename the group, add members and remove members; anyone can leave (if the last admin leaves, the longest-standing member becomes admin, and an empty group is deleted). New members only see messages sent after they joined. Groups, unread counters and the typing indicator all rely on the script having been run, so re-run it after pulling this update; until then the **Groups** tab shows a short "run the updated SQL" note and direct messages keep working.
+
 ## 3. Publish to GitHub Pages
 
 Commit and push all files. Keep `supabase-config.js` in the repo with only the Project URL and public anon/publishable key. GitHub Pages serves static files; Supabase provides authentication, database access, and realtime updates.

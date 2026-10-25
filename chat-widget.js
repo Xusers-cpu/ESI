@@ -11,58 +11,103 @@
   const panel = root.querySelector('#esi-panel'), launcher = root.querySelector('#esi-launcher'), body = root.querySelector('#esi-body');
   const introHTML = body.innerHTML;
   let authArea = root.querySelector('#esi-auth-area');
-  let supabase = null, currentUser = null, currentPeer = null, loading = false;
-  let inbox = null, tick = null;                                   // realtime inbox channel + polling fallback
-  let typingCh = null, typingReady = false, typingHideTimer = null, lastTypingSent = 0;
-  let lastSig = null, divider = null, initialScroll = false, forceBottom = false, hasReadAt = true;
-  let unread = {}, unreadSig = '';                                 // { senderId: count }
 
+  // ---------- State ----------
+  let supabase = null, currentUser = null, myName = 'Someone', loading = false;
+  // currentChat: { kind:'dm', id:<peer user id>, peer, title, sub } | { kind:'group', id:<group id>, group, title, sub, lastRead }
+  let currentChat = null, tab = 'members';
+  let inbox = null, ginbox = null, tick = null, tickN = 0;                         // realtime inbox channel + polling fallback
+  let typingCh = null, typingReady = false, lastTypingSent = 0; const typers = new Map();
+  let lastSig = null, divider = null, initialScroll = false, forceBottom = false, hasReadAt = true, groupsOk = null;
+  let unread = {}, gunread = {}, unreadSig = '';                    // unread counts: by sender (DMs) and by group
+  let directoryCache = [], groupsCache = [];
+
+  // ---------- Helpers ----------
   const esc = (s='') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const status = (msg, cls='esi-error') => { const el = body.querySelector('#esi-status'); if(el) el.innerHTML = `<div class="${cls}" role="status">${esc(msg)}</div>`; };
   const atBottom = el => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   const reducedMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const viewingPeer = () => !!currentPeer && panel.classList.contains('esi-open') && !document.hidden;
+  const viewingChat = () => !!currentChat && panel.classList.contains('esi-open') && !document.hidden;
   const peerName = p => p.display_name || p.username;
+  const ini = s => String(s||'?').slice(0,1).toUpperCase();
+  const hue = id => { let h=0; for(const c of String(id)) h=(h*31+c.charCodeAt(0))%360; return h; };
+  const sum = o => Object.values(o).reduce((a,b)=>a+b,0);
+  const plural = (n,w) => `${n} ${w}${n===1?'':'s'}`;
+  const errText = e => (e && e.message) ? e.message : 'Something went wrong. Please try again.';
+  const dmChat = peer => ({kind:'dm', id:peer.user_id, peer, title:peerName(peer), sub:'Study Circle member'});
+  const freshGroup = g => groupsCache.find(x=>x.id===g.id) || g;
+  const groupChat = g => ({kind:'group', id:g.id, group:g, title:g.name, sub:plural(g.count||0,'member'), lastRead:g.last_read_at||''});
 
   const toggle = (open) => {
     panel.classList.toggle('esi-open',open); launcher.setAttribute('aria-expanded',String(open));
     if(open){
       setTimeout(()=>{const f=panel.querySelector('input'); if(f) f.focus();},50);
-      if(currentUser){ if(currentPeer) loadMessages(); else loadUnread(); }
+      if(currentUser){ if(currentChat) loadMessages(); else loadUnread(); }
     }
   };
   launcher.addEventListener('click',()=>toggle(!panel.classList.contains('esi-open')));
   root.querySelector('#esi-close').addEventListener('click',()=>toggle(false));
   document.addEventListener('keydown',e=>{if(e.key==='Escape')toggle(false)});
-  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&currentUser){ loadUnread(); if(currentPeer) loadMessages(); } });
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&currentUser){ loadUnread(); if(currentChat) loadMessages(); } });
 
   // ---------- Unread counters ----------
-  const totalUnread = () => Object.values(unread).reduce((a,b)=>a+b,0);
+  function setCount(el,n){ if(!el) return; el.hidden=!n; el.textContent=n>99?'99+':String(n); }
   function renderBadges(){
-    const t = totalUnread(); let b = launcher.querySelector('.esi-launch-badge');
+    const dm=sum(unread), g=sum(gunread), t=dm+g;
+    let b=launcher.querySelector('.esi-launch-badge');
     if(t>0){
       if(!b){ b=document.createElement('span'); b.className='esi-launch-badge'; launcher.appendChild(b); }
-      b.textContent = t>99 ? '99+' : String(t); b.setAttribute('aria-label', `${t} unread message${t>1?'s':''}`);
+      b.textContent=t>99?'99+':String(t); b.setAttribute('aria-label',`${plural(t,'unread message')}`);
     } else if(b){ b.remove(); }
-    if(body.querySelector('#esi-directory')) filterDirectory();
+    renderTabCounts();
+    if(body.querySelector('#esi-directory')) renderList();
   }
+  function renderTabCounts(){
+    setCount(body.querySelector('[data-tab="members"] .esi-tabcount'),sum(unread));
+    setCount(body.querySelector('[data-tab="groups"] .esi-tabcount'),sum(gunread));
+  }
+  function commitUnread(){ unreadSig=JSON.stringify([unread,gunread]); renderBadges(); }
   async function loadUnread(){
-    if(!currentUser||!hasReadAt) return;
-    try{
-      const {data,error}=await supabase.from('direct_messages').select('sender_id').eq('recipient_id',currentUser.id).is('read_at',null).limit(1000);
-      if(error) throw error;
-      const m={}; (data||[]).forEach(r=>{ m[r.sender_id]=(m[r.sender_id]||0)+1; });
-      if(viewingPeer()) delete m[currentPeer.user_id];             // the open chat is being read right now
-      const sig=JSON.stringify(m); if(sig===unreadSig) return;
-      unread=m; unreadSig=sig; renderBadges();
-    }catch(e){ if(e&&(e.code==='42703'||/read_at/.test(e.message||''))) hasReadAt=false; /* run the updated SQL to enable counters */ }
+    if(!currentUser) return;
+    let dm=null, g=null;
+    if(hasReadAt){
+      try{
+        const {data,error}=await supabase.from('direct_messages').select('sender_id').eq('recipient_id',currentUser.id).is('read_at',null).limit(1000);
+        if(error) throw error;
+        dm={}; (data||[]).forEach(r=>{ dm[r.sender_id]=(dm[r.sender_id]||0)+1; });
+      }catch(e){ if(e&&(e.code==='42703'||/read_at/.test(e.message||''))) hasReadAt=false; }
+    }
+    if(groupsOk!==false){
+      try{
+        const {data,error}=await supabase.rpc('group_unread_counts');
+        if(error) throw error;
+        g={}; (data||[]).forEach(r=>{ g[r.group_id]=Number(r.unread); });
+      }catch(e){ /* groups SQL not installed yet */ }
+    }
+    if(dm===null) dm=unread; if(g===null) g=gunread;
+    if(viewingChat()){ if(currentChat.kind==='dm') delete dm[currentChat.id]; else delete g[currentChat.id]; }   // the open chat is being read right now
+    const sig=JSON.stringify([dm,g]); if(sig===unreadSig) return;
+    unread=dm; gunread=g; commitUnread();
   }
-  async function markRead(peerId){
-    if(!currentUser||!hasReadAt) return;
+  const isUnread = (chat,m) => chat.kind==='dm'
+    ? (hasReadAt && m.sender_id===chat.id && !m.read_at)
+    : (m.sender_id!==currentUser.id && m.created_at>(chat.lastRead||''));
+  async function markRead(chat,data){
+    if(!currentUser) return;
     try{
-      const {error}=await supabase.from('direct_messages').update({read_at:new Date().toISOString()}).eq('recipient_id',currentUser.id).eq('sender_id',peerId).is('read_at',null);
-      if(error) throw error;
-      if(unread[peerId]){ delete unread[peerId]; unreadSig=JSON.stringify(unread); renderBadges(); }
+      if(chat.kind==='dm'){
+        if(!hasReadAt) return;
+        const {error}=await supabase.from('direct_messages').update({read_at:new Date().toISOString()}).eq('recipient_id',currentUser.id).eq('sender_id',chat.id).is('read_at',null);
+        if(error) throw error;
+        if(unread[chat.id]){ delete unread[chat.id]; commitUnread(); }
+      } else {
+        const latest=data.reduce((a,m)=>m.created_at>a?m.created_at:a,'');   // server timestamps, so no clock-skew
+        if(!latest||latest<=(chat.lastRead||'')) return;
+        const {error}=await supabase.from('group_members').update({last_read_at:latest}).eq('group_id',chat.id).eq('user_id',currentUser.id);
+        if(error) throw error;
+        chat.lastRead=latest; const gi=groupsCache.find(x=>x.id===chat.id); if(gi) gi.last_read_at=latest;
+        if(gunread[chat.id]){ delete gunread[chat.id]; commitUnread(); }
+      }
     }catch(e){ /* non-fatal: counters just stay until the next refresh */ }
   }
 
@@ -72,26 +117,50 @@
     inbox = supabase.channel('esi-inbox-'+currentUser.id)
       .on('postgres_changes',{event:'INSERT',schema:'public',table:'direct_messages',filter:'recipient_id=eq.'+currentUser.id},payload=>{
         const m=payload.new||{};
-        if(currentPeer&&m.sender_id===currentPeer.user_id){ showTyping(false); loadMessages(); }
+        if(currentChat&&currentChat.kind==='dm'&&m.sender_id===currentChat.id){ removeTyper(m.sender_id); loadMessages(); }
         loadUnread();
-      }).subscribe();
-    // Polling fallback: keeps badges and the open chat fresh even if Realtime isn't enabled on the table.
-    if(!tick) tick = setInterval(()=>{ if(!currentUser||document.hidden) return; loadUnread(); if(currentPeer) loadMessages(); },4000);
+      })
+      .subscribe();
+    startGroupRealtime();
+    // Polling fallback: keeps badges and the open chat fresh even if Realtime isn't enabled on a table.
+    if(!tick) tick = setInterval(()=>{
+      if(!currentUser||document.hidden) return;
+      tickN++;
+      loadUnread(); if(currentChat) loadMessages();
+      if(groupsOk!==false&&(tab==='groups'||(currentChat&&currentChat.kind==='group')||tickN%5===0)) loadGroups();
+    },4000);
+  }
+  // Group events live on their own channel so a missing groups table can never break direct-message delivery.
+  function startGroupRealtime(){
+    if(!currentUser||ginbox||groupsOk!==true) return;
+    ginbox = supabase.channel('esi-groups-'+currentUser.id)
+      .on('postgres_changes',{event:'INSERT',schema:'public',table:'group_messages'},payload=>{   // RLS only delivers groups you belong to
+        const m=payload.new||{};
+        if(currentChat&&currentChat.kind==='group'&&currentChat.id===m.group_id){ if(m.sender_id!==currentUser.id) removeTyper(m.sender_id); loadMessages(); }
+        loadUnread();
+      })
+      .on('postgres_changes',{event:'INSERT',schema:'public',table:'group_members',filter:'user_id=eq.'+currentUser.id},()=>{ loadGroups(); loadUnread(); })   // you were added to a group
+      .subscribe();
   }
   function stopRealtime(){
     closeTyping();
     if(inbox){ const c=inbox; inbox=null; supabase.removeChannel(c); }
+    if(ginbox){ const c=ginbox; ginbox=null; supabase.removeChannel(c); }
     if(tick){ clearInterval(tick); tick=null; }
   }
-  function openTyping(peer){
+  function openTyping(chat){
     closeTyping();
-    const name='esi-typing-'+[currentUser.id,peer.user_id].sort().join('-');
+    const name = chat.kind==='dm' ? 'esi-typing-'+[currentUser.id,chat.id].sort().join('-') : 'esi-gtyping-'+chat.id;
     typingCh = supabase.channel(name,{config:{private:true,broadcast:{self:false}}})
-      .on('broadcast',{event:'typing'},({payload})=>{ if(payload&&payload.from===peer.user_id) showTyping(payload.typing!==false); })
+      .on('broadcast',{event:'typing'},({payload})=>{
+        if(!payload||payload.from===currentUser.id) return;
+        if(chat.kind==='dm'&&payload.from!==chat.id) return;
+        if(payload.typing===false) removeTyper(payload.from); else addTyper(payload.from, chat.kind==='dm'?chat.title:(payload.name||'Someone'));
+      })
       .subscribe(st=>{ typingReady = st==='SUBSCRIBED'; });         // if the typing policies aren't installed, this just stays off
   }
   function closeTyping(){
-    clearTimeout(typingHideTimer); lastTypingSent=0; typingReady=false;
+    clearTypers(); lastTypingSent=0; typingReady=false;
     if(typingCh){ const c=typingCh; typingCh=null; supabase.removeChannel(c); }
   }
   function sendTyping(on){
@@ -99,14 +168,19 @@
     const now=Date.now();
     if(on){ if(now-lastTypingSent<2000) return; lastTypingSent=now; }
     else { if(!lastTypingSent) return; lastTypingSent=0; }
-    typingCh.send({type:'broadcast',event:'typing',payload:{from:currentUser.id,typing:on}});
+    typingCh.send({type:'broadcast',event:'typing',payload:{from:currentUser.id,name:myName,typing:on}});
   }
-  function showTyping(on){
-    clearTimeout(typingHideTimer);
+  function showTypers(){
     const el=body.querySelector('#esi-typing'); if(!el) return;
-    if(on&&currentPeer){ el.textContent=peerName(currentPeer)+' is typing…'; typingHideTimer=setTimeout(()=>{el.textContent='';},3500); }
-    else el.textContent='';
+    const names=[...typers.values()].map(t=>t.name);
+    el.textContent = !names.length ? '' : names.length===1 ? `${names[0]} is typing…` : names.length===2 ? `${names[0]} and ${names[1]} are typing…` : 'Several people are typing…';
   }
+  function addTyper(id,name){
+    const t=typers.get(id); if(t) clearTimeout(t.timer);
+    typers.set(id,{name,timer:setTimeout(()=>{typers.delete(id);showTypers();},3500)}); showTypers();
+  }
+  function removeTyper(id){ const t=typers.get(id); if(t){ clearTimeout(t.timer); typers.delete(id); } showTypers(); }
+  function clearTypers(){ typers.forEach(t=>clearTimeout(t.timer)); typers.clear(); showTypers(); }
 
   // ---------- Auth ----------
   function ensureAuthArea(){
@@ -142,13 +216,15 @@
     authArea.querySelector('#esi-signin-tab').onclick=()=>draw(false); authArea.querySelector('#esi-signup-tab').onclick=()=>draw(true); draw(false);
   }
   async function ensureProfile(username, listed) {
+    myName=username;
     const {error}=await supabase.from('profiles').upsert({user_id:currentUser.id,username,display_name:username,is_listed:listed},{onConflict:'user_id'}); if(error) throw error;
   }
   async function initSession(){
     const {data:{user},error}=await supabase.auth.getUser(); if(error) throw error; currentUser=user;
-    if(!user){currentPeer=null;showAuth();return;}
-    const {data:profile,error:pe}=await supabase.from('profiles').select('username,is_listed').eq('user_id',user.id).maybeSingle();
+    if(!user){currentChat=null;showAuth();return;}
+    const {data:profile,error:pe}=await supabase.from('profiles').select('username,display_name,is_listed').eq('user_id',user.id).maybeSingle();
     if(pe) throw pe;
+    if(profile) myName=profile.display_name||profile.username;
     if(!profile){
       const username=(user.user_metadata?.username||'').toString();
       if(username){await ensureProfile(username,false);} else {showProfileSetup();return;}
@@ -161,22 +237,31 @@
     authArea.querySelector('#esi-profile-save').onclick=async()=>{try{const n=authArea.querySelector('#esi-profile-name').value.trim();if(!/^[a-zA-Z0-9_]{3,24}$/.test(n))throw Error('Use 3–24 letters, numbers or _.');await ensureProfile(n,authArea.querySelector('#esi-profile-optin').checked);await showDirectoryShell();await loadDirectory();}catch(e){status(e.message)}};
   }
 
-  // ---------- Directory ----------
+  // ---------- Directory (Members | Groups) ----------
   function showDirectoryShell(){
-    closeTyping(); currentPeer=null; body.classList.remove('esi-chat');
-    body.innerHTML=`<div class="esi-toolbar"><input class="esi-field" id="esi-search" placeholder="Find a study member…" aria-label="Search members"><button class="esi-btn esi-light" id="esi-refresh" title="Refresh directory">↻</button></div><div class="esi-muted" style="margin-bottom:8px">Members who opted in to the Study Circle</div><div id="esi-directory"><p class="esi-muted">Loading members…</p></div><div id="esi-status"></div><div class="esi-actions"><button class="esi-btn esi-light" id="esi-profile-toggle">Directory settings</button><button class="esi-btn esi-light" id="esi-signout">Sign out</button></div>`;
+    closeTyping(); currentChat=null; body.classList.remove('esi-chat');
+    body.innerHTML=`<div class="esi-tabs" role="tablist"><button class="esi-tab" role="tab" data-tab="members">Members<span class="esi-badge esi-tabcount" hidden></span></button><button class="esi-tab" role="tab" data-tab="groups">Groups<span class="esi-badge esi-tabcount" hidden></span></button></div><div class="esi-toolbar"><input class="esi-field" id="esi-search" aria-label="Search"><button class="esi-btn esi-light" id="esi-refresh" title="Refresh">↻</button></div><div class="esi-muted" id="esi-caption" style="margin-bottom:8px"></div><div id="esi-directory"><p class="esi-muted">Loading…</p></div><div id="esi-status"></div><div class="esi-actions"><button class="esi-btn esi-light" id="esi-profile-toggle">Directory settings</button><button class="esi-btn esi-light" id="esi-signout">Sign out</button></div>`;
+    body.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
     body.querySelector('#esi-refresh').onclick=loadDirectory;
-    body.querySelector('#esi-search').oninput=filterDirectory;
-    body.querySelector('#esi-signout').onclick=async()=>{stopRealtime();await supabase.auth.signOut();currentUser=null;currentPeer=null;unread={};unreadSig='';renderBadges();showAuth();};
+    body.querySelector('#esi-search').oninput=renderList;
+    body.querySelector('#esi-signout').onclick=async()=>{stopRealtime();await supabase.auth.signOut();currentUser=null;currentChat=null;unread={};gunread={};unreadSig='';groupsCache=[];directoryCache=[];groupsOk=null;renderBadges();showAuth();};
     body.querySelector('#esi-profile-toggle').onclick=showDirectorySettings;
-    startRealtime();
+    applyTabUI(); renderTabCounts(); startRealtime();
   }
-  let directoryCache=[];
+  function applyTabUI(){
+    body.querySelectorAll('[data-tab]').forEach(b=>{ const on=b.dataset.tab===tab; b.classList.toggle('esi-active',on); b.setAttribute('aria-selected',String(on)); });
+    const s=body.querySelector('#esi-search'); if(s) s.placeholder = tab==='groups' ? 'Find a group…' : 'Find a study member…';
+    const c=body.querySelector('#esi-caption'); if(c) c.textContent = tab==='groups' ? 'Your study groups' : 'Members who opted in to the Study Circle';
+  }
+  function setTab(t){ tab=t; applyTabUI(); const s=body.querySelector('#esi-search'); if(s) s.value=''; renderList(); if(t==='groups') loadGroups(); }
+  const renderList = () => tab==='groups' ? renderGroups() : filterDirectory();
+
   async function loadDirectory(){
     if(!currentUser)return;
-    const dest=body.querySelector('#esi-directory'); if(!dest)return; dest.innerHTML='<p class="esi-muted">Loading members…</p>';
+    const dest=body.querySelector('#esi-directory'); if(!dest)return; dest.innerHTML='<p class="esi-muted">Loading…</p>';
+    await loadGroups(true);
     await loadUnread();
-    try{const {data,error}=await supabase.from('profiles').select('user_id,username,display_name').eq('is_listed',true).neq('user_id',currentUser.id).order('username').limit(100);if(error)throw error;directoryCache=data||[];filterDirectory();}
+    try{const {data,error}=await supabase.from('profiles').select('user_id,username,display_name').eq('is_listed',true).neq('user_id',currentUser.id).order('username').limit(100);if(error)throw error;directoryCache=data||[];renderList();}
     catch(e){dest.innerHTML=`<p class="esi-error">Could not load the directory. Check the Supabase tables and access policies.</p>`;}
   }
   function filterDirectory(){
@@ -187,9 +272,9 @@
       .sort((a,b)=>((unread[b.user_id]||0)-(unread[a.user_id]||0))||a.username.localeCompare(b.username));
     dest.innerHTML=list.length?list.map(u=>{
       const n=unread[u.user_id]||0;
-      return `<button class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}"><span class="esi-avatar">${esc((u.display_name||u.username||'?').slice(0,1).toUpperCase())}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${n} unread message${n>1?'s':''}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?`${n} new message${n>1?'s':''}`:'Study Circle member'}</span></span><span style="margin-left:auto;color:#8291a3">›</span></button>`;
+      return `<button class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}"><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):'Study Circle member'}</span></span><span style="margin-left:auto;color:#8291a3">›</span></button>`;
     }).join(''):'<p class="esi-muted">No opted-in members found yet. Try again later.</p>';
-    dest.querySelectorAll('[data-peer]').forEach(btn=>btn.onclick=()=>openConversation(list.find(u=>u.user_id===btn.dataset.peer)));
+    dest.querySelectorAll('[data-peer]').forEach(btn=>btn.onclick=()=>openChat(dmChat(list.find(u=>u.user_id===btn.dataset.peer))));
   }
   async function showDirectorySettings(){
     const {data:p,error}=await supabase.from('profiles').select('username,display_name,is_listed').eq('user_id',currentUser.id).single();if(error){status(error.message);return;}
@@ -197,64 +282,171 @@
     body.querySelector('#esi-back').onclick=()=>{showDirectoryShell();loadDirectory()};body.querySelector('#esi-save-list').onclick=async()=>{try{const {error}=await supabase.from('profiles').update({is_listed:body.querySelector('#esi-list-toggle').checked}).eq('user_id',currentUser.id);if(error)throw error;showDirectoryShell();await loadDirectory();}catch(e){status(e.message)}};
   }
 
-  // ---------- Conversation ----------
-  async function openConversation(peer){
-    if(!peer)return;
-    currentPeer=peer; lastSig=null; initialScroll=false; divider=null; forceBottom=false;
+  // ---------- Groups: list, create, info ----------
+  async function loadGroups(quiet){
+    if(!currentUser) return;
+    try{
+      const [g,m]=await Promise.all([
+        supabase.from('groups').select('id,name,created_by,group_members(count)'),
+        supabase.from('group_members').select('group_id,role,last_read_at').eq('user_id',currentUser.id)
+      ]);
+      if(g.error) throw g.error; if(m.error) throw m.error;
+      const mine=new Map((m.data||[]).map(r=>[r.group_id,r]));
+      groupsCache=(g.data||[]).filter(x=>mine.has(x.id)).map(x=>({id:x.id,name:x.name,created_by:x.created_by,count:x.group_members?.[0]?.count||0,role:mine.get(x.id).role,last_read_at:mine.get(x.id).last_read_at}));
+      groupsOk=true; startGroupRealtime();
+      if(currentChat&&currentChat.kind==='group'){
+        const still=groupsCache.find(x=>x.id===currentChat.id);
+        if(!still){ tab='groups'; showDirectoryShell(); await loadDirectory(); status('You are no longer a member of that group.'); return; }
+        currentChat.group=still; currentChat.title=still.name; currentChat.sub=plural(still.count,'member');
+      }
+    }catch(e){ groupsOk=false; groupsCache=[]; }
+    if(!quiet && body.querySelector('#esi-directory')) renderList();
+  }
+  function renderGroups(){
+    const dest=body.querySelector('#esi-directory'); if(!dest) return;
+    if(groupsOk===false){ dest.innerHTML='<p class="esi-muted">Groups need the latest database setup. Run the updated <code>supabase-schema.sql</code> in the Supabase SQL Editor, then press ↻.</p>'; return; }
+    const q=(body.querySelector('#esi-search')?.value||'').toLowerCase();
+    const list=groupsCache.filter(g=>g.name.toLowerCase().includes(q)).sort((a,b)=>((gunread[b.id]||0)-(gunread[a.id]||0))||a.name.localeCompare(b.name));
+    dest.innerHTML=`<button class="esi-btn esi-light" id="esi-new-group" style="width:100%;margin-bottom:8px">＋ New group</button>`+(list.length?list.map(g=>{
+      const n=gunread[g.id]||0;
+      return `<button class="esi-user${n?' esi-has-unread':''}" data-gid="${esc(g.id)}"><span class="esi-avatar esi-gavatar" style="background:hsl(${hue(g.id)} 70% 90%);color:hsl(${hue(g.id)} 45% 28%)">${esc(ini(g.name))}</span><span><span class="esi-user-name">${esc(g.name)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):plural(g.count,'member')+(g.role==='admin'?' · you are admin':'')}</span></span><span style="margin-left:auto;color:#8291a3">›</span></button>`;
+    }).join(''):(groupsCache.length?'<p class="esi-muted">No groups match your search.</p>':'<p class="esi-muted">You are not in any groups yet. Create one to chat with several members at once.</p>'));
+    dest.querySelector('#esi-new-group').onclick=showNewGroup;
+    dest.querySelectorAll('[data-gid]').forEach(btn=>btn.onclick=()=>{ const g=groupsCache.find(x=>String(x.id)===btn.dataset.gid); if(g) openChat(groupChat(g)); });
+  }
+  function renderPicker(box,candidates,picked,q,onChange){
+    const list=candidates.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q.toLowerCase()));
+    box.innerHTML=list.length?list.map(u=>`<label class="esi-pick"><input type="checkbox" value="${esc(u.user_id)}" ${picked.has(u.user_id)?'checked':''}><span class="esi-avatar esi-sm">${esc(ini(u.display_name||u.username))}</span><span>${esc(u.display_name||u.username)}</span></label>`).join(''):'<p class="esi-muted">No members to show.</p>';
+    box.querySelectorAll('input').forEach(cb=>cb.onchange=()=>{ if(cb.checked) picked.add(cb.value); else picked.delete(cb.value); onChange(); });
+  }
+  function backToGroups(){ tab='groups'; showDirectoryShell(); loadDirectory(); }
+  function showNewGroup(){
+    closeTyping(); currentChat=null; body.classList.remove('esi-chat');
+    const picked=new Set();
+    body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← Groups</button><strong>New group</strong></div><input class="esi-field" id="esi-group-name" maxlength="40" placeholder="Group name (e.g. Class 9 Physics)" aria-label="Group name"><div class="esi-muted" style="margin:6px 0 2px">Add members <span id="esi-picked-count"></span></div><input class="esi-field" id="esi-pick-search" placeholder="Search members…" aria-label="Search members"><div class="esi-picklist" id="esi-pick-list"></div><div id="esi-status"></div><button class="esi-btn" id="esi-group-create" style="width:100%" disabled>Create group</button>`;
+    const nameEl=body.querySelector('#esi-group-name'), searchEl=body.querySelector('#esi-pick-search'), listEl=body.querySelector('#esi-pick-list'), createEl=body.querySelector('#esi-group-create'), countEl=body.querySelector('#esi-picked-count');
+    const refresh=()=>{ countEl.textContent=picked.size?`· ${picked.size} selected`:''; createEl.disabled=!(nameEl.value.trim()&&picked.size>=1); };
+    const draw=()=>renderPicker(listEl,directoryCache,picked,searchEl.value,refresh);
+    nameEl.oninput=refresh; searchEl.oninput=draw; draw(); refresh();
+    body.querySelector('#esi-back').onclick=backToGroups;
+    createEl.onclick=async()=>{
+      createEl.disabled=true; createEl.textContent='Creating…';
+      try{
+        const {data,error}=await supabase.rpc('create_group',{p_name:nameEl.value.trim(),p_members:[...picked]}); if(error) throw error;
+        await loadGroups(true);
+        const g=groupsCache.find(x=>x.id===data); tab='groups';
+        if(g) openChat(groupChat(g)); else backToGroups();
+      }catch(e){ status(errText(e)); createEl.textContent='Create group'; refresh(); }
+    };
+  }
+  async function showGroupInfo(g){
+    closeTyping(); currentChat=null; body.classList.remove('esi-chat');
+    body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← Chat</button><strong>Group info</strong></div><p class="esi-muted">Loading…</p><div id="esi-status"></div>`;
+    body.querySelector('#esi-back').onclick=()=>openChat(groupChat(freshGroup(g)));
+    try{
+      const {data,error}=await supabase.rpc('get_group_members',{p_group:g.id}); if(error) throw error;
+      const roster=data||[], me=roster.find(r=>r.user_id===currentUser.id), isAdmin=me?.role==='admin';
+      g.count=roster.length; if(me) g.role=me.role;
+      const inGroup=new Set(roster.map(r=>r.user_id)), candidates=directoryCache.filter(u=>!inGroup.has(u.user_id));
+      body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← Chat</button><strong>Group info</strong></div>
+        <div class="esi-ginfo-head"><span class="esi-avatar esi-gavatar esi-lg" style="background:hsl(${hue(g.id)} 70% 90%);color:hsl(${hue(g.id)} 45% 28%)">${esc(ini(g.name))}</span><div><strong>${esc(g.name)}</strong><div class="esi-muted">${plural(roster.length,'member')}</div></div></div>
+        ${isAdmin?`<div class="esi-section-title">Rename group</div><div class="esi-toolbar"><input class="esi-field" id="esi-rename" maxlength="40" value="${esc(g.name)}" aria-label="Group name"><button class="esi-btn esi-light" id="esi-rename-save">Save</button></div>`:''}
+        <div class="esi-section-title">Members</div>
+        <div id="esi-roster">${roster.map(r=>`<div class="esi-roster-row"><span class="esi-avatar esi-sm">${esc(ini(r.display_name||r.username))}</span><span class="esi-roster-name">${esc(r.display_name||r.username)}${r.user_id===currentUser.id?' <span class="esi-muted">(you)</span>':''}</span>${r.role==='admin'?'<span class="esi-tag">Admin</span>':''}${isAdmin&&r.user_id!==currentUser.id&&r.role!=='admin'?`<button class="esi-x" data-remove="${esc(r.user_id)}" aria-label="Remove ${esc(r.display_name||r.username)}">✕</button>`:''}</div>`).join('')}</div>
+        ${isAdmin?`<div class="esi-section-title">Add members</div><input class="esi-field" id="esi-add-search" placeholder="Search members…" aria-label="Search members to add"><div class="esi-picklist" id="esi-add-list"></div><button class="esi-btn" id="esi-add-go" style="width:100%" disabled>Add selected</button>`:''}
+        <div id="esi-status"></div>
+        <div class="esi-actions"><button class="esi-btn esi-danger" id="esi-leave">Leave group</button></div>`;
+      body.querySelector('#esi-back').onclick=()=>openChat(groupChat(freshGroup(g)));
+      const reload=async()=>{ await loadGroups(true); showGroupInfo(groupsCache.find(x=>x.id===g.id)||g); };
+      body.querySelectorAll('[data-remove]').forEach(b=>b.onclick=async()=>{ if(!confirm('Remove this member from the group?')) return; try{ const {error}=await supabase.rpc('remove_group_member',{p_group:g.id,p_user:b.dataset.remove}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
+      if(isAdmin){
+        body.querySelector('#esi-rename-save').onclick=async()=>{ try{ const name=body.querySelector('#esi-rename').value.trim(); if(!name) throw new Error('Enter a group name.'); const {data:rows,error}=await supabase.from('groups').update({name}).eq('id',g.id).select('id'); if(error) throw error; if(!rows||!rows.length) throw new Error('Only admins can rename this group.'); await reload(); }catch(e){ status(errText(e)); } };
+        const picked=new Set(), addGo=body.querySelector('#esi-add-go'), addSearch=body.querySelector('#esi-add-search'), addList=body.querySelector('#esi-add-list');
+        const refresh=()=>{ addGo.disabled=!picked.size; addGo.textContent=picked.size?`Add ${picked.size} selected`:'Add selected'; };
+        const draw=()=>renderPicker(addList,candidates,picked,addSearch.value,refresh);
+        addSearch.oninput=draw; draw();
+        addGo.onclick=async()=>{ addGo.disabled=true; try{ const {error}=await supabase.rpc('add_group_members',{p_group:g.id,p_members:[...picked]}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); refresh(); } };
+      }
+      body.querySelector('#esi-leave').onclick=async()=>{ if(!confirm('Leave this group? You will stop receiving its messages.')) return; try{ const {error}=await supabase.rpc('leave_group',{p_group:g.id}); if(error) throw error; backToGroups(); }catch(e){ status(errText(e)); } };
+    }catch(e){ status(errText(e)); }
+  }
+
+  // ---------- Conversation (direct or group) ----------
+  async function openChat(chat){
+    if(!chat||(chat.kind==='dm'&&!chat.peer)) return;
+    currentChat=chat; lastSig=null; initialScroll=false; divider=null; forceBottom=false;
     body.classList.add('esi-chat');
-    body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← Members</button><span class="esi-avatar">${esc((peer.display_name||peer.username||'?').slice(0,1).toUpperCase())}</span><div><strong style="font-size:13px">${esc(peerName(peer))}</strong><div class="esi-muted">Study Circle member</div></div></div><div class="esi-note esi-muted">Keep the conversation respectful. Avoid sharing personal contact details or sensitive information.</div><div class="esi-listwrap"><div class="esi-message-list" id="esi-messages" aria-live="polite"><p class="esi-muted">Loading conversation…</p></div><button type="button" class="esi-jump" id="esi-jump" hidden>↓ New messages</button></div><div class="esi-typing" id="esi-typing" role="status" aria-live="polite"></div><div id="esi-status"></div><form class="esi-compose" id="esi-compose"><input class="esi-field" id="esi-message-input" maxlength="2000" autocomplete="off" placeholder="Write a study-related message…" aria-label="Message"><button class="esi-btn" type="submit" aria-label="Send message">Send</button></form>`;
+    const isGroup=chat.kind==='group';
+    const avatar=isGroup?`<span class="esi-avatar esi-gavatar" style="background:hsl(${hue(chat.id)} 70% 90%);color:hsl(${hue(chat.id)} 45% 28%)">${esc(ini(chat.title))}</span>`:`<span class="esi-avatar">${esc(ini(chat.title))}</span>`;
+    body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← ${isGroup?'Groups':'Members'}</button>${avatar}<div><strong style="font-size:13px">${esc(chat.title)}</strong><div class="esi-muted">${esc(chat.sub)}</div></div>${isGroup?'<button class="esi-back esi-info" id="esi-info" aria-label="Group info" title="Group info">ⓘ</button>':''}</div><div class="esi-note esi-muted">Keep the conversation respectful. Avoid sharing personal contact details or sensitive information.</div><div class="esi-listwrap"><div class="esi-message-list" id="esi-messages" aria-live="polite"><p class="esi-muted">Loading conversation…</p></div><button type="button" class="esi-jump" id="esi-jump" hidden>↓ New messages</button></div><div class="esi-typing" id="esi-typing" role="status" aria-live="polite"></div><div id="esi-status"></div><form class="esi-compose" id="esi-compose"><input class="esi-field" id="esi-message-input" maxlength="2000" autocomplete="off" placeholder="Write a study-related message…" aria-label="Message"><button class="esi-btn" type="submit" aria-label="Send message">Send</button></form>`;
     const list=body.querySelector('#esi-messages'), jump=body.querySelector('#esi-jump'), input=body.querySelector('#esi-message-input');
-    body.querySelector('#esi-back').onclick=()=>{showDirectoryShell();loadDirectory();};
+    body.querySelector('#esi-back').onclick=()=>{ tab=isGroup?'groups':'members'; showDirectoryShell(); loadDirectory(); };
+    if(isGroup) body.querySelector('#esi-info').onclick=()=>showGroupInfo(chat.group);
     list.addEventListener('scroll',()=>{ if(atBottom(list)) jump.hidden=true; });
     jump.onclick=()=>{ list.scrollTo({top:list.scrollHeight,behavior:reducedMotion()?'auto':'smooth'}); jump.hidden=true; };
     input.addEventListener('input',()=>sendTyping(input.value.trim().length>0));
-    body.querySelector('#esi-compose').onsubmit=async e=>{e.preventDefault();const message=input.value.trim();if(!message||loading)return;loading=true;sendTyping(false);try{const {error}=await supabase.from('direct_messages').insert({sender_id:currentUser.id,recipient_id:peer.user_id,body:message});if(error)throw error;input.value='';forceBottom=true;await loadMessages();}catch(err){status(err.message||'Message could not be sent.');}finally{loading=false;}};
-    openTyping(peer);
+    body.querySelector('#esi-compose').onsubmit=async e=>{
+      e.preventDefault(); const message=input.value.trim(); if(!message||loading) return;
+      loading=true; sendTyping(false);
+      try{
+        const row = isGroup ? {group_id:chat.id,sender_id:currentUser.id,body:message} : {sender_id:currentUser.id,recipient_id:chat.id,body:message};
+        const {error}=await supabase.from(isGroup?'group_messages':'direct_messages').insert(row); if(error) throw error;
+        input.value=''; forceBottom=true; await loadMessages();
+      }catch(err){ status(err.message||'Message could not be sent.'); }
+      finally{ loading=false; }
+    };
+    openTyping(chat);
     await loadMessages();
   }
-  async function fetchMessages(peer){
-    const run=()=>supabase.from('direct_messages').select(hasReadAt?'id,sender_id,recipient_id,body,created_at,read_at':'id,sender_id,recipient_id,body,created_at')
-      .or(`and(sender_id.eq.${currentUser.id},recipient_id.eq.${peer.user_id}),and(sender_id.eq.${peer.user_id},recipient_id.eq.${currentUser.id})`)
-      .order('created_at',{ascending:false}).limit(150);                // newest 150, flipped to chronological below
+  async function fetchMessages(chat){
+    let run;
+    if(chat.kind==='group'){
+      run=()=>supabase.from('group_messages').select('id,sender_id,sender_name,body,created_at').eq('group_id',chat.id).order('created_at',{ascending:false}).limit(150);
+    } else {
+      run=()=>supabase.from('direct_messages').select(hasReadAt?'id,sender_id,recipient_id,body,created_at,read_at':'id,sender_id,recipient_id,body,created_at')
+        .or(`and(sender_id.eq.${currentUser.id},recipient_id.eq.${chat.id}),and(sender_id.eq.${chat.id},recipient_id.eq.${currentUser.id})`)
+        .order('created_at',{ascending:false}).limit(150);          // newest 150, flipped to chronological below
+    }
     let {data,error}=await run();
-    if(error&&hasReadAt&&(error.code==='42703'||/read_at/.test(error.message||''))){ hasReadAt=false; ({data,error}=await run()); }
+    if(error&&chat.kind==='dm'&&hasReadAt&&(error.code==='42703'||/read_at/.test(error.message||''))){ hasReadAt=false; ({data,error}=await run()); }
     if(error) throw error;
     return (data||[]).slice().reverse();
   }
   async function loadMessages(){
-    if(!currentPeer)return;const box=body.querySelector('#esi-messages');if(!box)return;
-    const peer=currentPeer;
+    const chat=currentChat; if(!chat) return;
+    const box=body.querySelector('#esi-messages'); if(!box) return;
     try{
-      const data=await fetchMessages(peer);
-      if(currentPeer!==peer||!box.isConnected)return;                    // user left this chat while loading
+      const data=await fetchMessages(chat);
+      if(currentChat!==chat||!box.isConnected) return;               // user left this chat while loading
       const first=!initialScroll, jump=body.querySelector('#esi-jump');
-      const isUnreadFromPeer=m=>hasReadAt&&m.sender_id===peer.user_id&&!m.read_at;
-      if(first){                                                         // remember where the unread block starts
-        const fu=data.find(isUnreadFromPeer);
-        divider=fu?{id:fu.id,count:data.filter(isUnreadFromPeer).length}:null;
+      if(first){                                                     // remember where the unread block starts
+        const fu=data.find(m=>isUnread(chat,m));
+        divider=fu?{id:fu.id,count:data.filter(m=>isUnread(chat,m)).length}:null;
       }
       const sig=data.map(m=>m.id).join(',');
       if(sig!==lastSig){
         const wasAtBottom=atBottom(box), prevTop=box.scrollTop, stick=wasAtBottom||forceBottom; forceBottom=false;
         lastSig=sig;
-        box.innerHTML=data.length?data.map(m=>
-          (divider&&m.id===divider.id?`<div class="esi-unread-divider" id="esi-unread-divider" role="separator"><span>${divider.count} new message${divider.count>1?'s':''}</span></div>`:'')+
-          `<div class="esi-bubble ${m.sender_id===currentUser.id?'esi-mine':'esi-theirs'}">${esc(m.body).replace(/\n/g,'<br>')}<span class="esi-time">${new Date(m.created_at).toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'})}</span></div>`
-        ).join(''):'<p class="esi-muted">Start with a question about a science topic or homework.</p>';
+        box.innerHTML=data.length?data.map(m=>{
+          const mine=m.sender_id===currentUser.id;
+          const who=(chat.kind==='group'&&!mine)?`<span class="esi-sender" style="color:hsl(${hue(m.sender_id)} 45% 32%)">${esc(m.sender_name||'Former member')}</span>`:'';
+          return (divider&&m.id===divider.id?`<div class="esi-unread-divider" id="esi-unread-divider" role="separator"><span>${plural(divider.count,'new message')}</span></div>`:'')+
+            `<div class="esi-bubble ${mine?'esi-mine':'esi-theirs'}">${who}${esc(m.body).replace(/\n/g,'<br>')}<span class="esi-time">${new Date(m.created_at).toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'})}</span></div>`;
+        }).join(''):'<p class="esi-muted">Start with a question about a science topic or homework.</p>';
         if(first){
           const d=box.querySelector('#esi-unread-divider');
           if(d) box.scrollTop+=d.getBoundingClientRect().top-box.getBoundingClientRect().top-8;   // land on the first unread message
           else box.scrollTop=box.scrollHeight;
           if(jump&&!atBottom(box)) jump.hidden=false;
         } else if(stick){ box.scrollTop=box.scrollHeight; }
-        else {                                                           // reading older messages: don't yank the view
+        else {                                                       // reading older messages: don't yank the view
           box.scrollTop=prevTop;
           const last=data[data.length-1];
-          if(jump&&last&&last.sender_id===peer.user_id) jump.hidden=false;
+          if(jump&&last&&last.sender_id!==currentUser.id) jump.hidden=false;
         }
       }
       initialScroll=true;
-      if(viewingPeer()&&data.some(isUnreadFromPeer)) markRead(peer.user_id);   // auto-mark as read
+      if(viewingChat()&&data.some(m=>isUnread(chat,m))) markRead(chat,data);   // auto-mark as read
     }catch(e){box.innerHTML='<p class="esi-error">Messages could not load. Check your Supabase policies and Realtime setup.</p>';}
   }
 

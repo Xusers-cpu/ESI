@@ -20,3 +20,25 @@
 .esi-unread-divider::before,.esi-unread-divider::after{content:"";flex:1;height:1px;background:#f1b8b3}
 .esi-jump{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);border:0;border-radius:999px;padding:6px 12px;font:inherit;font-size:11px;font-weight:700;background:#173b60;color:#fff;box-shadow:0 6px 18px #10243d40;cursor:pointer}
 .esi-jump[hidden]{display:none}
+/* Groups: tabs, group avatars, sender names, info panel, member picker */
+.esi-badge[hidden]{display:none}
+.esi-tabs{display:flex;gap:6px;margin-bottom:10px;padding:3px;background:#edf3f8;border-radius:12px}
+.esi-tab{flex:1;display:flex;align-items:center;justify-content:center;gap:4px;border:0;border-radius:9px;padding:8px 10px;background:transparent;color:#4b5f76;font:inherit;font-size:13px;font-weight:700;cursor:pointer}
+.esi-tab.esi-active{background:#fff;color:#173b60;box-shadow:0 1px 4px #10243d1f}
+.esi-gavatar{border-radius:12px}
+.esi-avatar.esi-sm{width:28px;height:28px;flex:0 0 28px;font-size:12px}
+.esi-avatar.esi-lg{width:52px;height:52px;flex:0 0 52px;font-size:22px;border-radius:16px}
+.esi-info{margin-left:auto;font-size:19px;line-height:1;padding:4px 6px}
+.esi-sender{display:block;font-size:11px;font-weight:800;margin-bottom:2px}
+.esi-ginfo-head{display:flex;align-items:center;gap:12px;margin:4px 0 8px}
+.esi-section-title{margin:14px 0 6px;font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#667085}
+.esi-roster-row{display:flex;align-items:center;gap:10px;padding:6px 2px;font-size:13px}
+.esi-roster-name{flex:1;min-width:0;overflow-wrap:anywhere}
+.esi-tag{font-size:10px;font-weight:800;color:#135b52;background:#d9f5ed;border-radius:999px;padding:2px 8px}
+.esi-x{border:0;background:transparent;color:#b42318;font-size:14px;cursor:pointer;padding:4px 6px;border-radius:8px}
+.esi-x:hover{background:#fdecea}
+.esi-picklist{max-height:170px;overflow-y:auto;border:1px solid #e3eaf1;border-radius:10px;padding:4px;margin:6px 0 10px}
+.esi-pick{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:8px;font-size:13px;cursor:pointer}
+.esi-pick:hover{background:#f2f7fa}
+.esi-pick input{margin:0}
+.esi-btn.esi-danger{background:#fdecea;color:#b42318}
