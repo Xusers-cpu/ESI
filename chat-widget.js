@@ -10,7 +10,8 @@
   document.body.appendChild(root);
   const panel = root.querySelector('#esi-panel'), launcher = root.querySelector('#esi-launcher'), body = root.querySelector('#esi-body');
   const authArea = root.querySelector('#esi-auth-area');
-  let supabase = null, currentUser = null, currentPeer = null, realtime = null, loading = false;
+  let supabase = null, currentUser = null, currentPeer = null, realtime = null, loading = false, poll = null, lastSig = null;
+  const stopPoll = () => { if(poll){clearInterval(poll);poll=null;} };
   const esc = (s='') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const status = (msg, cls='esi-error') => { const el = body.querySelector('#esi-status'); if(el) el.innerHTML = `<div class="${cls}" role="status">${esc(msg)}</div>`; };
   const toggle = (open) => { panel.classList.toggle('esi-open',open); launcher.setAttribute('aria-expanded',String(open)); if(open) setTimeout(()=>{const f=panel.querySelector('input'); if(f) f.focus();},50); };
@@ -68,7 +69,7 @@
     body.innerHTML=`<div class="esi-toolbar"><input class="esi-field" id="esi-search" placeholder="Find a study member…" aria-label="Search members"><button class="esi-btn esi-light" id="esi-refresh" title="Refresh directory">↻</button></div><div class="esi-muted" style="margin-bottom:8px">Members who opted in to the Study Circle</div><div id="esi-directory"><p class="esi-muted">Loading members…</p></div><div id="esi-status"></div><div class="esi-actions"><button class="esi-btn esi-light" id="esi-profile-toggle">Directory settings</button><button class="esi-btn esi-light" id="esi-signout">Sign out</button></div>`;
     body.querySelector('#esi-refresh').onclick=loadDirectory;
     body.querySelector('#esi-search').oninput=filterDirectory;
-    body.querySelector('#esi-signout').onclick=async()=>{if(realtime){await supabase.removeChannel(realtime);realtime=null;}await supabase.auth.signOut();currentUser=null;currentPeer=null;showAuth();};
+    body.querySelector('#esi-signout').onclick=async()=>{stopPoll();if(realtime){await supabase.removeChannel(realtime);realtime=null;}await supabase.auth.signOut();currentUser=null;currentPeer=null;showAuth();};
     body.querySelector('#esi-profile-toggle').onclick=showDirectorySettings;
   }
   let directoryCache=[];
@@ -87,15 +88,20 @@
   async function openConversation(peer){
     if(!peer)return;currentPeer=peer;
     body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← Members</button><span class="esi-avatar">${esc((peer.display_name||peer.username||'?').slice(0,1).toUpperCase())}</span><div><strong style="font-size:13px">${esc(peer.display_name||peer.username)}</strong><div class="esi-muted">Study Circle member</div></div></div><div class="esi-note esi-muted">Keep the conversation respectful. Avoid sharing personal contact details or sensitive information.</div><div class="esi-message-list" id="esi-messages"><p class="esi-muted">Loading conversation…</p></div><div id="esi-status"></div><form class="esi-compose" id="esi-compose"><input class="esi-field" id="esi-message-input" maxlength="2000" autocomplete="off" placeholder="Write a study-related message…" aria-label="Message"><button class="esi-btn" type="submit" aria-label="Send message">Send</button></form>`;
-    body.querySelector('#esi-back').onclick=async()=>{if(realtime){await supabase.removeChannel(realtime);realtime=null;}showDirectoryShell();await loadDirectory();};
+    body.querySelector('#esi-back').onclick=async()=>{stopPoll();if(realtime){await supabase.removeChannel(realtime);realtime=null;}showDirectoryShell();await loadDirectory();};
     body.querySelector('#esi-compose').onsubmit=async e=>{e.preventDefault();const input=body.querySelector('#esi-message-input'),message=input.value.trim();if(!message||loading)return;loading=true;try{const {error}=await supabase.from('direct_messages').insert({sender_id:currentUser.id,recipient_id:peer.user_id,body:message});if(error)throw error;input.value='';await loadMessages();}catch(err){status(err.message||'Message could not be sent.');}finally{loading=false;}};
+    lastSig=null;stopPoll();
     await loadMessages();
+    // Fallback: if Realtime isn't enabled for direct_messages, new incoming messages
+    // would only appear after the user sends one. Poll so they always show up.
+    poll=setInterval(()=>{if(!document.hidden)loadMessages();},3000);
     if(realtime)await supabase.removeChannel(realtime);
     realtime=supabase.channel('esi-dm-'+[currentUser.id,peer.user_id].sort().join('-')).on('postgres_changes',{event:'INSERT',schema:'public',table:'direct_messages'},payload=>{const m=payload.new;if((m.sender_id===currentUser.id&&m.recipient_id===peer.user_id)||(m.sender_id===peer.user_id&&m.recipient_id===currentUser.id))loadMessages();}).subscribe();
   }
   async function loadMessages(){
     if(!currentPeer)return;const box=body.querySelector('#esi-messages');if(!box)return;
     try{const {data,error}=await supabase.from('direct_messages').select('id,sender_id,recipient_id,body,created_at').or(`and(sender_id.eq.${currentUser.id},recipient_id.eq.${currentPeer.user_id}),and(sender_id.eq.${currentPeer.user_id},recipient_id.eq.${currentUser.id})`).order('created_at',{ascending:true}).limit(150);if(error)throw error;
+      const sig=(data||[]).map(m=>m.id).join(',');if(sig===lastSig)return;lastSig=sig;
       box.innerHTML=(data||[]).map(m=>`<div class="esi-bubble ${m.sender_id===currentUser.id?'esi-mine':'esi-theirs'}">${esc(m.body).replace(/\n/g,'<br>')}<span class="esi-time">${new Date(m.created_at).toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'})}</span></div>`).join('')||'<p class="esi-muted">Start with a question about a science topic or homework.</p>';box.scrollTop=box.scrollHeight;
     }catch(e){box.innerHTML='<p class="esi-error">Messages could not load. Check your Supabase policies and Realtime setup.</p>';}
   }
