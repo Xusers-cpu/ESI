@@ -19,7 +19,7 @@
   document.addEventListener('keydown',e=>{if(e.key==='Escape')toggle(false)});
 
   function setupMessage() {
-    authArea.innerHTML = `<p class="esi-error">Study Circle isn't connected yet.</p><p class="esi-muted">To enable the member directory and messaging, add your Supabase project URL and public anon key in <code>supabase-config.js</code>, then run the included SQL setup script. Do not add a service-role key to a public website.</p><a href="SUPABASE_SETUP.md" target="_blank" rel="noopener" class="esi-muted">Open setup guide ↗</a>`;
+    authArea.innerHTML = `<p class="esi-error">Study Circle isn't connected yet.</p><p class="esi-muted">To enable the member directory and messaging, add your Supabase project URL and public anon key in <code>assets/supabase-config.js</code>, then run the included SQL setup script. Do not add a service-role key to a public website.</p><a href="SUPABASE_SETUP.md" target="_blank" rel="noopener" class="esi-muted">Open setup guide ↗</a>`;
   }
   function showAuth() {
     authArea.innerHTML = `<div class="esi-toolbar"><button class="esi-btn" id="esi-signin-tab">Sign in</button><button class="esi-btn esi-light" id="esi-signup-tab">Create account</button></div><div id="esi-auth-form"></div><div id="esi-status"></div>`;
