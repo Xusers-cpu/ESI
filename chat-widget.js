@@ -51,16 +51,37 @@
   const groupChat = g => ({kind:'group', id:g.id, group:g, title:g.name, sub:plural(g.count||0,'member'), lastRead:g.last_read_at||''});
 
   const toggle = (open) => {
-    panel.classList.toggle('esi-open',open); launcher.setAttribute('aria-expanded',String(open));
-    if(open){
-      setTimeout(()=>{const f=panel.querySelector('input'); if(f) f.focus();},50);
-      if(currentUser){ if(currentChat) loadMessages(); else loadUnread(); }
+    panel.classList.toggle('esi-open', open);
+    launcher.setAttribute('aria-expanded', String(open));
+    if (open) {
+      if (!unlocked) {
+        showCoverChatbot();
+      } else if (currentUser) {
+        if (currentChat) loadMessages(); else loadUnread();
+      }
+      setTimeout(() => { const f = panel.querySelector('input'); if (f) f.focus(); }, 50);
+    } else {
+      // Lock again when panel closes
+      if (unlocked) {
+        localStorage.removeItem('esi_unlocked');
+        unlocked = false;
+        updateLauncherLabel();
+        currentChat = null;
+        // keep currentUser so session stays, but force re-auth path next open
+        stopRealtime();
+      }
     }
   };
-  launcher.addEventListener('click',()=>toggle(!panel.classList.contains('esi-open')));
-  root.querySelector('#esi-close').addEventListener('click',()=>toggle(false));
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')toggle(false)});
-  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&currentUser){ loadUnread(); if(currentChat) loadMessages(); } });
+  launcher.addEventListener('click', () => toggle(!panel.classList.contains('esi-open')));
+  root.querySelector('#esi-close').addEventListener('click', () => toggle(false));
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') toggle(false); });
+  // Click outside the panel closes it (and locks)
+  document.addEventListener('click', (e) => {
+    if (!panel.classList.contains('esi-open')) return;
+    if (root.contains(e.target)) return; // click was inside the widget
+    toggle(false);
+  });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && currentUser) { loadUnread(); if (currentChat) loadMessages(); } });
 
   // ---------- Unread counters ----------
   function setCount(el,n){ if(!el) return; el.hidden=!n; el.textContent=n>99?'99+':String(n); }
