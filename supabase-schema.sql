@@ -607,3 +607,4 @@ exception when duplicate_object then null;
 end $$;
 
 -- Never expose the service_role key in any frontend file.
+
