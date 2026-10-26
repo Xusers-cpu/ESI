@@ -57,13 +57,10 @@
       if(currentUser){ if(currentChat) loadMessages(); else loadUnread(); }
     }
   };
-  launcher.addEventListener('click',(e)=>{ e.stopPropagation(); toggle(!panel.classList.contains('esi-open')); });
-  root.querySelector('#esi-close').addEventListener('click',(e)=>{ e.stopPropagation(); toggle(false); });
+  launcher.addEventListener('click',()=>toggle(!panel.classList.contains('esi-open')));
+  root.querySelector('#esi-close').addEventListener('click',()=>toggle(false));
   document.addEventListener('keydown',e=>{if(e.key==='Escape')toggle(false)});
   document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&currentUser){ loadUnread(); if(currentChat) loadMessages(); } });
-  // Stop clicks inside the panel from bubbling and accidentally closing the widget
-  panel.addEventListener('click', e => e.stopPropagation());
-  panel.addEventListener('mousedown', e => e.stopPropagation());
 
   // ---------- Unread counters ----------
   function setCount(el,n){ if(!el) return; el.hidden=!n; el.textContent=n>99?'99+':String(n); }
@@ -255,7 +252,7 @@
   // ---------- Directory (Members | Groups) ----------
   function showDirectoryShell(){
     closeTyping(); currentChat=null; body.classList.remove('esi-chat');
-    body.innerHTML=`<div class="esi-tabs" role="tablist"><button type="button" class="esi-tab" role="tab" data-tab="members">Members<span class="esi-badge esi-tabcount" hidden></span></button><button type="button" class="esi-tab" role="tab" data-tab="groups">Groups<span class="esi-badge esi-tabcount" hidden></span></button></div><div class="esi-toolbar"><input class="esi-field" id="esi-search" aria-label="Search"><button type="button" class="esi-btn esi-light" id="esi-refresh" title="Refresh">↻</button></div><div class="esi-muted" id="esi-caption" style="margin-bottom:8px"></div><div id="esi-directory"><p class="esi-muted">Loading…</p></div><div id="esi-status"></div><div class="esi-actions"><button type="button" class="esi-btn esi-light" id="esi-profile-toggle">Directory settings</button><button type="button" class="esi-btn esi-light" id="esi-signout">Sign out</button></div>`;
+    body.innerHTML=`<div class="esi-tabs" role="tablist"><button class="esi-tab" role="tab" data-tab="members">Members<span class="esi-badge esi-tabcount" hidden></span></button><button class="esi-tab" role="tab" data-tab="groups">Groups<span class="esi-badge esi-tabcount" hidden></span></button></div><div class="esi-toolbar"><input class="esi-field" id="esi-search" aria-label="Search"><button class="esi-btn esi-light" id="esi-refresh" title="Refresh">↻</button></div><div class="esi-muted" id="esi-caption" style="margin-bottom:8px"></div><div id="esi-directory"><p class="esi-muted">Loading…</p></div><div id="esi-status"></div><div class="esi-actions"><button class="esi-btn esi-light" id="esi-profile-toggle">Directory settings</button><button class="esi-btn esi-light" id="esi-signout">Sign out</button></div>`;
     body.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
     body.querySelector('#esi-refresh').onclick=loadDirectory;
     body.querySelector('#esi-search').oninput=renderList;
@@ -287,15 +284,11 @@
       .sort((a,b)=>((unread[b.user_id]||0)-(unread[a.user_id]||0))||a.username.localeCompare(b.username));
     dest.innerHTML=list.length?list.map(u=>{
       const n=unread[u.user_id]||0;
-      return `<div class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}" role="button" tabindex="0"><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):'Study Circle member'}</span></span><span style="margin-left:auto"><button type="button" class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button></span></div>`;
+      return `<button class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}"><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):'Study Circle member'}</span></span><span style="margin-left:auto"><button class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button></span></button>`;
     }).join(''):'<p class="esi-muted">No opted-in members found yet. Try again later.</p>';
-    dest.querySelectorAll('[data-peer]').forEach(el=>el.onclick=(e)=>{
-      if(e.target.closest('[data-req]')) return;
-      e.preventDefault(); e.stopPropagation();
-      openChat(dmChat(list.find(u=>u.user_id===el.dataset.peer)));
-    });
+    dest.querySelectorAll('[data-peer]').forEach(btn=>btn.onclick=()=>openChat(dmChat(list.find(u=>u.user_id===btn.dataset.peer))));
     dest.querySelectorAll('[data-req]').forEach(btn=>btn.onclick=async (e)=>{
-      e.preventDefault(); e.stopPropagation();
+      e.stopPropagation();
       try{
         const {error} = await supabase.from('chat_requests').insert({sender_id: currentUser.id, recipient_id: btn.dataset.req, status: 'pending'});
         if(error) throw error;
@@ -334,16 +327,12 @@
     if(groupsOk===false){ dest.innerHTML='<p class="esi-muted">Groups need the latest database setup. Run the updated <code>supabase-schema.sql</code> in the Supabase SQL Editor, then press ↻.</p>'; return; }
     const q=(body.querySelector('#esi-search')?.value||'').toLowerCase();
     const list=groupsCache.filter(g=>g.name.toLowerCase().includes(q)).sort((a,b)=>((gunread[b.id]||0)-(gunread[a.id]||0))||a.name.localeCompare(b.name));
-    dest.innerHTML=`<button type="button" class="esi-btn esi-light" id="esi-new-group" style="width:100%;margin-bottom:8px">＋ New group</button>`+(list.length?list.map(g=>{
+    dest.innerHTML=`<button class="esi-btn esi-light" id="esi-new-group" style="width:100%;margin-bottom:8px">＋ New group</button>`+(list.length?list.map(g=>{
       const n=gunread[g.id]||0;
-      return `<div class="esi-user${n?' esi-has-unread':''}" data-gid="${esc(g.id)}" role="button" tabindex="0"><span class="esi-avatar esi-gavatar" style="background:hsl(${hue(g.id)} 70% 90%);color:hsl(${hue(g.id)} 45% 28%)">${esc(ini(g.name))}</span><span><span class="esi-user-name">${esc(g.name)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):plural(g.count,'member')+(g.role==='admin'?' · you are admin':'')}</span></span><span style="margin-left:auto;color:#8291a3">›</span></div>`;
+      return `<button class="esi-user${n?' esi-has-unread':''}" data-gid="${esc(g.id)}"><span class="esi-avatar esi-gavatar" style="background:hsl(${hue(g.id)} 70% 90%);color:hsl(${hue(g.id)} 45% 28%)">${esc(ini(g.name))}</span><span><span class="esi-user-name">${esc(g.name)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):plural(g.count,'member')+(g.role==='admin'?' · you are admin':'')}</span></span><span style="margin-left:auto;color:#8291a3">›</span></button>`;
     }).join(''):(groupsCache.length?'<p class="esi-muted">No groups match your search.</p>':'<p class="esi-muted">You are not in any groups yet. Create one to chat with several members at once.</p>'));
-    const newGroupBtn = dest.querySelector('#esi-new-group');
-    if(newGroupBtn) newGroupBtn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); showNewGroup(); };
-    dest.querySelectorAll('[data-gid]').forEach(el=>el.onclick=(e)=>{
-      e.preventDefault(); e.stopPropagation();
-      const g=groupsCache.find(x=>String(x.id)===el.dataset.gid); if(g) openChat(groupChat(g));
-    });
+    dest.querySelector('#esi-new-group').onclick=showNewGroup;
+    dest.querySelectorAll('[data-gid]').forEach(btn=>btn.onclick=()=>{ const g=groupsCache.find(x=>String(x.id)===btn.dataset.gid); if(g) openChat(groupChat(g)); });
   }
   function renderPicker(box,candidates,picked,q,onChange){
     const list=candidates.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q.toLowerCase()));
@@ -354,14 +343,13 @@
   function showNewGroup(){
     closeTyping(); currentChat=null; body.classList.remove('esi-chat');
     const picked=new Set();
-    body.innerHTML=`<div class="esi-topline"><button type="button" class="esi-back" id="esi-back">← Groups</button><strong>New group</strong></div><input class="esi-field" id="esi-group-name" maxlength="40" placeholder="Group name (e.g. Class 9 Physics)" aria-label="Group name"><div class="esi-muted" style="margin:6px 0 2px">Add members <span id="esi-picked-count"></span></div><input class="esi-field" id="esi-pick-search" placeholder="Search members…" aria-label="Search members"><div class="esi-picklist" id="esi-pick-list"></div><div id="esi-status"></div><button type="button" class="esi-btn" id="esi-group-create" style="width:100%" disabled>Create group</button>`;
+    body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← Groups</button><strong>New group</strong></div><input class="esi-field" id="esi-group-name" maxlength="40" placeholder="Group name (e.g. Class 9 Physics)" aria-label="Group name"><div class="esi-muted" style="margin:6px 0 2px">Add members <span id="esi-picked-count"></span></div><input class="esi-field" id="esi-pick-search" placeholder="Search members…" aria-label="Search members"><div class="esi-picklist" id="esi-pick-list"></div><div id="esi-status"></div><button class="esi-btn" id="esi-group-create" style="width:100%" disabled>Create group</button>`;
     const nameEl=body.querySelector('#esi-group-name'), searchEl=body.querySelector('#esi-pick-search'), listEl=body.querySelector('#esi-pick-list'), createEl=body.querySelector('#esi-group-create'), countEl=body.querySelector('#esi-picked-count');
     const refresh=()=>{ countEl.textContent=picked.size?`· ${picked.size} selected`:''; createEl.disabled=!(nameEl.value.trim()&&picked.size>=1); };
     const draw=()=>renderPicker(listEl,directoryCache,picked,searchEl.value,refresh);
     nameEl.oninput=refresh; searchEl.oninput=draw; draw(); refresh();
     body.querySelector('#esi-back').onclick=backToGroups;
-    createEl.onclick=async(e)=>{
-      e.preventDefault(); e.stopPropagation();
+    createEl.onclick=async()=>{
       createEl.disabled=true; createEl.textContent='Creating…';
       try{
         const {data,error}=await supabase.rpc('create_group',{p_name:nameEl.value.trim(),p_members:[...picked]}); if(error) throw error;
