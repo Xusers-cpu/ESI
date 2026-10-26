@@ -372,13 +372,25 @@
         <div class="esi-ginfo-head"><span class="esi-avatar esi-gavatar esi-lg" style="background:hsl(${hue(g.id)} 70% 90%);color:hsl(${hue(g.id)} 45% 28%)">${esc(ini(g.name))}</span><div><strong>${esc(g.name)}</strong><div class="esi-muted">${plural(roster.length,'member')}</div></div></div>
         ${isAdmin?`<div class="esi-section-title">Rename group</div><div class="esi-toolbar"><input class="esi-field" id="esi-rename" maxlength="40" value="${esc(g.name)}" aria-label="Group name"><button class="esi-btn esi-light" id="esi-rename-save">Save</button></div>`:''}
         <div class="esi-section-title">Members</div>
-        <div id="esi-roster">${roster.map(r=>`<div class="esi-roster-row"><span class="esi-avatar esi-sm">${esc(ini(r.display_name||r.username))}</span><span class="esi-roster-name">${esc(r.display_name||r.username)}${r.user_id===currentUser.id?' <span class="esi-muted">(you)</span>':''}</span>${r.role==='admin'?'<span class="esi-tag">Admin</span>':''}${isAdmin&&r.user_id!==currentUser.id&&r.role!=='admin'?`<button class="esi-x" data-remove="${esc(r.user_id)}" aria-label="Remove ${esc(r.display_name||r.username)}">✕</button>`:''}</div>`).join('')}</div>
+        <div id="esi-roster">${roster.map(r=>`<div class="esi-roster-row"><span class="esi-avatar esi-sm">${esc(ini(r.display_name||r.username))}</span><span class="esi-roster-name">${esc(r.display_name||r.username)}${r.user_id===currentUser.id?' <span class="esi-muted">(you)</span>':''}</span>${r.role==='admin'?'<span class="esi-tag">Admin</span>':''}${isAdmin&&r.user_id!==currentUser.id&&r.role!=='admin'?`<button class="esi-x" data-remove="${esc(r.user_id)}" aria-label="Remove ${esc(r.display_name||r.username)}">✕</button><button class="esi-btn esi-light" data-promote="${esc(r.user_id)}" style="font-size:11px;padding:2px 6px;">Promote</button>`:''}</div>`).join('')}</div>
         ${isAdmin?`<div class="esi-section-title">Add members</div><input class="esi-field" id="esi-add-search" placeholder="Search members…" aria-label="Search members to add"><div class="esi-picklist" id="esi-add-list"></div><button class="esi-btn" id="esi-add-go" style="width:100%" disabled>Add selected</button>`:''}
+        <div class="esi-section-title">Group settings</div>
+        <label class="esi-optin"><input id="esi-mute" type="checkbox"><span>Mute notifications for this group</span></label>
+        <button class="esi-btn esi-light" id="esi-save-mute">Save mute</button>
         <div id="esi-status"></div>
         <div class="esi-actions"><button class="esi-btn esi-danger" id="esi-leave">Leave group</button></div>`;
       body.querySelector('#esi-back').onclick=()=>openChat(groupChat(freshGroup(g)));
       const reload=async()=>{ await loadGroups(true); showGroupInfo(groupsCache.find(x=>x.id===g.id)||g); };
       body.querySelectorAll('[data-remove]').forEach(b=>b.onclick=async()=>{ if(!confirm('Remove this member from the group?')) return; try{ const {error}=await supabase.rpc('remove_group_member',{p_group:g.id,p_user:b.dataset.remove}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
+      body.querySelectorAll('[data-promote]').forEach(b=>b.onclick=async()=>{ try{ const {error}=await supabase.rpc('promote_to_admin',{p_group:g.id,p_user:b.dataset.promote}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
+      body.querySelector('#esi-save-mute').onclick=async()=>{
+        try{
+          const muted = body.querySelector('#esi-mute').checked;
+          const {error} = await supabase.from('group_members').update({muted}).eq('group_id',g.id).eq('user_id',currentUser.id);
+          if(error) throw error;
+          status('Mute preference saved.','esi-success');
+        }catch(e){ status(errText(e)); }
+      };
       if(isAdmin){
         body.querySelector('#esi-rename-save').onclick=async()=>{ try{ const name=body.querySelector('#esi-rename').value.trim(); if(!name) throw new Error('Enter a group name.'); const {data:rows,error}=await supabase.from('groups').update({name}).eq('id',g.id).select('id'); if(error) throw error; if(!rows||!rows.length) throw new Error('Only admins can rename this group.'); await reload(); }catch(e){ status(errText(e)); } };
         const picked=new Set(), addGo=body.querySelector('#esi-add-go'), addSearch=body.querySelector('#esi-add-search'), addList=body.querySelector('#esi-add-list');
@@ -410,6 +422,7 @@
       loading=true; sendTyping(false);
       try{
         const row = isGroup ? {group_id:chat.id,sender_id:currentUser.id,body:message} : {sender_id:currentUser.id,recipient_id:chat.id,body:message};
+        if(pendingReply){ row.reply_to = pendingReply; pendingReply = null; input.placeholder = 'Write a study-related message…'; }
         const {error}=await supabase.from(isGroup?'group_messages':'direct_messages').insert(row); if(error) throw error;
         input.value=''; forceBottom=true; await loadMessages();
       }catch(err){ status(err.message||'Message could not be sent.'); }
@@ -455,15 +468,20 @@
           const mine=m.sender_id===currentUser.id;
           const who=(chat.kind==='group'&&!mine)?`<span class="esi-sender" style="color:hsl(${hue(m.sender_id)} 45% 32%)">${esc(m.sender_name||'Former member')}</span>`:'';
           const edited = m.edited_at ? ' <small>(edited)</small>' : '';
-          const actions = mine ? `<div class="esi-bubble-actions"><button data-edit="${m.id}">✎</button><button data-del="${m.id}">✕</button></div>` : '';
+          const quote = m.reply_to ? `<div class="esi-quote">↩ Quoted message</div>` : '';
+          const ticks = mine ? `<span class="esi-ticks${m.read_at?' read':''}">${m.read_at?'✓✓':'✓'}</span>` : '';
+          const actions = mine ? `<div class="esi-bubble-actions"><button data-reply="${m.id}">↩</button><button data-react="${m.id}">😊</button><button data-edit="${m.id}">✎</button><button data-del="${m.id}">✕</button></div>` : `<div class="esi-bubble-actions"><button data-reply="${m.id}">↩</button><button data-react="${m.id}">😊</button></div>`;
           return (divider&&m.id===divider.id?`<div class="esi-unread-divider" id="esi-unread-divider" role="separator"><span>${plural(divider.count,'new message')}</span></div>`:'')+
-            `<div class="esi-bubble ${mine?'esi-mine':'esi-theirs'}">${who}${esc(m.body).replace(/\n/g,'<br>')}${edited}<span class="esi-time">${new Date(m.created_at).toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'})}</span>${actions}</div>`;
+            `<div class="esi-bubble ${mine?'esi-mine':'esi-theirs'}">${quote}${who}${esc(m.body).replace(/\n/g,'<br>')}${edited}<span class="esi-time">${new Date(m.created_at).toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'})}${ticks}</span>${actions}<div class="esi-reactions" data-mid="${m.id}"></div></div>`;
         }).join(''):'<p class="esi-muted">Start with a question about a science topic or homework.</p>';
-        // Bind load earlier and actions
+        // Bind actions
         const loadBtn = box.querySelector('#esi-load-earlier');
         if(loadBtn) loadBtn.onclick = () => loadOlderMessages(chat);
         box.querySelectorAll('[data-edit]').forEach(btn => btn.onclick = () => editMessage(btn.dataset.edit, chat));
         box.querySelectorAll('[data-del]').forEach(btn => btn.onclick = () => deleteMessage(btn.dataset.del, chat));
+        box.querySelectorAll('[data-reply]').forEach(btn => btn.onclick = () => startReply(btn.dataset.reply, chat));
+        box.querySelectorAll('[data-react]').forEach(btn => btn.onclick = () => addReaction(btn.dataset.react, chat));
+        loadReactions(box, chat);
         if(first){
           const d=box.querySelector('#esi-unread-divider');
           if(d) box.scrollTop+=d.getBoundingClientRect().top-box.getBoundingClientRect().top-8;   // land on the first unread message
@@ -505,6 +523,48 @@
     const {error} = await supabase.from(table).delete().eq('id', id);
     if(error) status(error.message); else loadMessages();
   }
+
+  let pendingReply = null;
+  function startReply(id, chat){
+    pendingReply = id;
+    const input = body.querySelector('#esi-message-input');
+    if(input){ input.placeholder = 'Replying…'; input.focus(); }
+  }
+
+  async function addReaction(mid, chat){
+    const emoji = prompt('Reaction emoji (e.g. 👍 or ❤️):','👍');
+    if(!emoji) return;
+    const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
+    const {error} = await supabase.from('reactions').insert({message_id: mid, message_table: table, user_id: currentUser.id, emoji});
+    if(error && !/duplicate/i.test(error.message)) status(error.message);
+    else loadReactions(body.querySelector('#esi-messages'), chat);
+  }
+
+  async function loadReactions(box, chat){
+    if(!box) return;
+    const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
+    const {data} = await supabase.from('reactions').select('message_id,emoji,user_id').eq('message_table', table);
+    if(!data) return;
+    const map = {};
+    data.forEach(r => { if(!map[r.message_id]) map[r.message_id]=[]; map[r.message_id].push(r); });
+    box.querySelectorAll('[data-mid]').forEach(el => {
+      const mid = el.dataset.mid;
+      const rs = map[mid] || [];
+      el.innerHTML = rs.map(r => `<span class="esi-reaction${r.user_id===currentUser.id?' mine':''}">${esc(r.emoji)}</span>`).join('');
+    });
+  }
+
+  async function reportUser(userId, reason){
+    const {error} = await supabase.from('reports').insert({reporter_id: currentUser.id, reported_user_id: userId, reason});
+    if(error) status(error.message); else status('Report submitted. Admins can review it in Supabase.','esi-success');
+  }
+
+  // Online / last seen heartbeat
+  setInterval(async () => {
+    if(currentUser && unlocked){
+      await supabase.from('profiles').update({last_seen_at: new Date().toISOString()}).eq('user_id', currentUser.id);
+    }
+  }, 60000);
 
   async function start(){
     const url=window.ESI_SUPABASE_URL,key=window.ESI_SUPABASE_ANON_KEY;
