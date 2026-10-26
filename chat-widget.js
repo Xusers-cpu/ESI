@@ -6,7 +6,7 @@
   let typingCh = null, typingReady = false, lastTypingSent = 0; const typers = new Map();
   let lastSig = null, divider = null, initialScroll = false, forceBottom = false, hasReadAt = true, groupsOk = null;
   let unread = {}, gunread = {}, unreadSig = '';
-  let directoryCache = [], groupsCache = [];
+  let directoryCache = [], groupsCache = [], requestsCache = [];
   let unlocked = localStorage.getItem('esi_unlocked') === 'true';
   let darkMode = localStorage.getItem('esi_dark') === 'true';
   let olderMessagesLoading = false;
@@ -140,6 +140,7 @@
       tickN++;
       loadUnread(); if(currentChat) loadMessages();
       if(groupsOk!==false&&(tab==='groups'||(currentChat&&currentChat.kind==='group')||tickN%5===0)) loadGroups();
+      if(tab==='members' && tickN%3===0) loadRequests().then(()=>{ if(body.querySelector('#esi-directory')) renderList(); });
     },4000);
   }
   // Group events live on their own channel so a missing groups table can never break direct-message delivery.
@@ -273,8 +274,17 @@
     const dest=body.querySelector('#esi-directory'); if(!dest)return; dest.innerHTML='<p class="esi-muted">Loading…</p>';
     await loadGroups(true);
     await loadUnread();
+    await loadRequests();
     try{const {data,error}=await supabase.from('profiles').select('user_id,username,display_name').eq('is_listed',true).neq('user_id',currentUser.id).order('username').limit(100);if(error)throw error;directoryCache=data||[];renderList();}
     catch(e){dest.innerHTML=`<p class="esi-error">Could not load the directory. Check the Supabase tables and access policies.</p>`;}
+  }
+  async function loadRequests(){
+    if(!currentUser) return;
+    try{
+      const {data,error}=await supabase.from('chat_requests').select('id,sender_id,recipient_id,status,created_at').or(`sender_id.eq.${currentUser.id},recipient_id.eq.${currentUser.id}`);
+      if(error) throw error;
+      requestsCache = data || [];
+    }catch(e){ requestsCache = []; /* non-fatal */ }
   }
   function filterDirectory(){
     const dest=body.querySelector('#esi-directory');if(!dest)return;
@@ -282,17 +292,66 @@
     // Members who wrote to you first, then everyone else alphabetically.
     const list=directoryCache.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q))
       .sort((a,b)=>((unread[b.user_id]||0)-(unread[a.user_id]||0))||a.username.localeCompare(b.username));
-    dest.innerHTML=list.length?list.map(u=>{
+    // Pending incoming requests for a highlight section
+    const incomingPending = requestsCache.filter(r => r.recipient_id === currentUser.id && r.status === 'pending');
+    let html = '';
+    if(incomingPending.length){
+      html += `<div class="esi-section-title">Chat requests (${incomingPending.length})</div>`;
+      incomingPending.forEach(r => {
+        const sender = directoryCache.find(u => u.user_id === r.sender_id) || {username:'Someone', display_name:'Someone'};
+        html += `<div class="esi-user" style="cursor:default;background:#f4f8fb;margin-bottom:6px;"><span class="esi-avatar">${esc(ini(sender.display_name||sender.username))}</span><span><span class="esi-user-name">${esc(sender.display_name||sender.username)}</span><span class="esi-user-sub">Wants to connect</span></span><span style="margin-left:auto;display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${r.id}">Accept</button><button class="esi-request-btn deny" data-deny="${r.id}">Deny</button></span></div>`;
+      });
+      html += `<div class="esi-section-title" style="margin-top:12px;">Directory</div>`;
+    }
+    dest.innerHTML = html + (list.length?list.map(u=>{
       const n=unread[u.user_id]||0;
-      return `<button class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}"><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):'Study Circle member'}</span></span><span style="margin-left:auto"><button class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button></span></button>`;
-    }).join(''):'<p class="esi-muted">No opted-in members found yet. Try again later.</p>';
-    dest.querySelectorAll('[data-peer]').forEach(btn=>btn.onclick=()=>openChat(dmChat(list.find(u=>u.user_id===btn.dataset.peer))));
+      const req = requestsCache.find(r => (r.sender_id === currentUser.id && r.recipient_id === u.user_id) || (r.recipient_id === currentUser.id && r.sender_id === u.user_id));
+      let actionHtml = '';
+      let canOpen = false;
+      if(req && req.status === 'accepted'){
+        actionHtml = '<span class="esi-muted" style="font-size:11px;">Connected</span>';
+        canOpen = true;
+      } else if(req && req.status === 'pending' && req.sender_id === currentUser.id){
+        actionHtml = '<span class="esi-muted" style="font-size:11px;">Pending…</span>';
+      } else if(req && req.status === 'pending' && req.recipient_id === currentUser.id){
+        actionHtml = `<span style="display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${req.id}">Accept</button><button class="esi-request-btn deny" data-deny="${req.id}">Deny</button></span>`;
+      } else if(req && req.status === 'denied'){
+        actionHtml = '<span class="esi-muted" style="font-size:11px;">Declined</span>';
+      } else {
+        actionHtml = `<button class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button>`;
+      }
+      return `<button class="esi-user${n?' esi-has-unread':''}${canOpen?'':' '}" data-peer="${esc(u.user_id)}" ${canOpen?'':'style="cursor:default;"'}><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'): (req&&req.status==='accepted'?'Connected study partner':'Study Circle member')}</span></span><span style="margin-left:auto">${actionHtml}</span></button>`;
+    }).join(''):'<p class="esi-muted">No opted-in members found yet. Try again later.</p>');
+    // Bind events
+    dest.querySelectorAll('[data-peer]').forEach(btn=>{
+      if(btn.style.cursor === 'default') return; // not clickable if not connected
+      btn.onclick=()=>openChat(dmChat(list.find(u=>u.user_id===btn.dataset.peer)));
+    });
     dest.querySelectorAll('[data-req]').forEach(btn=>btn.onclick=async (e)=>{
       e.stopPropagation();
       try{
         const {error} = await supabase.from('chat_requests').insert({sender_id: currentUser.id, recipient_id: btn.dataset.req, status: 'pending'});
         if(error) throw error;
         status('Request sent!','esi-success');
+        await loadRequests(); renderList();
+      }catch(err){ status(err.message); }
+    });
+    dest.querySelectorAll('[data-accept]').forEach(btn=>btn.onclick=async (e)=>{
+      e.stopPropagation();
+      try{
+        const {error} = await supabase.from('chat_requests').update({status:'accepted'}).eq('id', btn.dataset.accept);
+        if(error) throw error;
+        status('Request accepted! You can now message them.','esi-success');
+        await loadRequests(); renderList();
+      }catch(err){ status(err.message); }
+    });
+    dest.querySelectorAll('[data-deny]').forEach(btn=>btn.onclick=async (e)=>{
+      e.stopPropagation();
+      try{
+        const {error} = await supabase.from('chat_requests').update({status:'denied'}).eq('id', btn.dataset.deny);
+        if(error) throw error;
+        status('Request declined.','esi-success');
+        await loadRequests(); renderList();
       }catch(err){ status(err.message); }
     });
   }
