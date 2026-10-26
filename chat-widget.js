@@ -6,7 +6,7 @@
   let typingCh = null, typingReady = false, lastTypingSent = 0; const typers = new Map();
   let lastSig = null, divider = null, initialScroll = false, forceBottom = false, hasReadAt = true, groupsOk = null;
   let unread = {}, gunread = {}, unreadSig = '';
-  let directoryCache = [], groupsCache = [], requestsCache = [];
+  let directoryCache = [], groupsCache = [];
   let unlocked = localStorage.getItem('esi_unlocked') === 'true';
   let darkMode = localStorage.getItem('esi_dark') === 'true';
   let olderMessagesLoading = false;
@@ -51,37 +51,19 @@
   const groupChat = g => ({kind:'group', id:g.id, group:g, title:g.name, sub:plural(g.count||0,'member'), lastRead:g.last_read_at||''});
 
   const toggle = (open) => {
-    panel.classList.toggle('esi-open', open);
-    launcher.setAttribute('aria-expanded', String(open));
-    if (open) {
-      if (!unlocked) {
-        showCoverChatbot();
-      } else if (currentUser) {
-        if (currentChat) loadMessages(); else loadUnread();
-      }
-      setTimeout(() => { const f = panel.querySelector('input'); if (f) f.focus(); }, 50);
-    } else {
-      // Lock again when panel closes
-      if (unlocked) {
-        localStorage.removeItem('esi_unlocked');
-        unlocked = false;
-        updateLauncherLabel();
-        currentChat = null;
-        // keep currentUser so session stays, but force re-auth path next open
-        stopRealtime();
-      }
+    panel.classList.toggle('esi-open',open); launcher.setAttribute('aria-expanded',String(open));
+    if(open){
+      setTimeout(()=>{const f=panel.querySelector('input'); if(f) f.focus();},50);
+      if(currentUser){ if(currentChat) loadMessages(); else loadUnread(); }
     }
   };
-  launcher.addEventListener('click', () => toggle(!panel.classList.contains('esi-open')));
-  root.querySelector('#esi-close').addEventListener('click', () => toggle(false));
-  document.addEventListener('keydown', e => { if (e.key === 'Escape') toggle(false); });
-  // Click outside the panel closes it (and locks)
-  document.addEventListener('click', (e) => {
-    if (!panel.classList.contains('esi-open')) return;
-    if (root.contains(e.target)) return; // click was inside the widget
-    toggle(false);
-  });
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && currentUser) { loadUnread(); if (currentChat) loadMessages(); } });
+  launcher.addEventListener('click',(e)=>{ e.stopPropagation(); toggle(!panel.classList.contains('esi-open')); });
+  root.querySelector('#esi-close').addEventListener('click',(e)=>{ e.stopPropagation(); toggle(false); });
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')toggle(false)});
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&currentUser){ loadUnread(); if(currentChat) loadMessages(); } });
+  // Stop clicks inside the panel from bubbling and accidentally closing the widget
+  panel.addEventListener('click', e => e.stopPropagation());
+  panel.addEventListener('mousedown', e => e.stopPropagation());
 
   // ---------- Unread counters ----------
   function setCount(el,n){ if(!el) return; el.hidden=!n; el.textContent=n>99?'99+':String(n); }
@@ -161,7 +143,6 @@
       tickN++;
       loadUnread(); if(currentChat) loadMessages();
       if(groupsOk!==false&&(tab==='groups'||(currentChat&&currentChat.kind==='group')||tickN%5===0)) loadGroups();
-      if(tab==='members' && tickN%2===0) loadRequests().then(()=>{ if(body.querySelector('#esi-directory')) renderList(); });
     },4000);
   }
   // Group events live on their own channel so a missing groups table can never break direct-message delivery.
@@ -274,7 +255,7 @@
   // ---------- Directory (Members | Groups) ----------
   function showDirectoryShell(){
     closeTyping(); currentChat=null; body.classList.remove('esi-chat');
-    body.innerHTML=`<div class="esi-tabs" role="tablist"><button class="esi-tab" role="tab" data-tab="members">Members<span class="esi-badge esi-tabcount" hidden></span></button><button class="esi-tab" role="tab" data-tab="groups">Groups<span class="esi-badge esi-tabcount" hidden></span></button></div><div class="esi-toolbar"><input class="esi-field" id="esi-search" aria-label="Search"><button class="esi-btn esi-light" id="esi-refresh" title="Refresh">↻</button></div><div class="esi-muted" id="esi-caption" style="margin-bottom:8px"></div><div id="esi-directory"><p class="esi-muted">Loading…</p></div><div id="esi-status"></div><div class="esi-actions"><button class="esi-btn esi-light" id="esi-profile-toggle">Directory settings</button><button class="esi-btn esi-light" id="esi-signout">Sign out</button></div>`;
+    body.innerHTML=`<div class="esi-tabs" role="tablist"><button type="button" class="esi-tab" role="tab" data-tab="members">Members<span class="esi-badge esi-tabcount" hidden></span></button><button type="button" class="esi-tab" role="tab" data-tab="groups">Groups<span class="esi-badge esi-tabcount" hidden></span></button></div><div class="esi-toolbar"><input class="esi-field" id="esi-search" aria-label="Search"><button type="button" class="esi-btn esi-light" id="esi-refresh" title="Refresh">↻</button></div><div class="esi-muted" id="esi-caption" style="margin-bottom:8px"></div><div id="esi-directory"><p class="esi-muted">Loading…</p></div><div id="esi-status"></div><div class="esi-actions"><button type="button" class="esi-btn esi-light" id="esi-profile-toggle">Directory settings</button><button type="button" class="esi-btn esi-light" id="esi-signout">Sign out</button></div>`;
     body.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
     body.querySelector('#esi-refresh').onclick=loadDirectory;
     body.querySelector('#esi-search').oninput=renderList;
@@ -295,106 +276,30 @@
     const dest=body.querySelector('#esi-directory'); if(!dest)return; dest.innerHTML='<p class="esi-muted">Loading…</p>';
     await loadGroups(true);
     await loadUnread();
-    await loadRequests();
     try{const {data,error}=await supabase.from('profiles').select('user_id,username,display_name').eq('is_listed',true).neq('user_id',currentUser.id).order('username').limit(100);if(error)throw error;directoryCache=data||[];renderList();}
     catch(e){dest.innerHTML=`<p class="esi-error">Could not load the directory. Check the Supabase tables and access policies.</p>`;}
-  }
-  async function loadRequests(){
-    if(!currentUser) return;
-    try{
-      const {data,error}=await supabase.from('chat_requests').select('id,sender_id,recipient_id,status,created_at').or(`sender_id.eq.${currentUser.id},recipient_id.eq.${currentUser.id}`);
-      if(error) throw error;
-      requestsCache = data || [];
-    }catch(e){ requestsCache = []; }
   }
   function filterDirectory(){
     const dest=body.querySelector('#esi-directory');if(!dest)return;
     const q=(body.querySelector('#esi-search')?.value||'').toLowerCase();
+    // Members who wrote to you first, then everyone else alphabetically.
     const list=directoryCache.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q))
       .sort((a,b)=>((unread[b.user_id]||0)-(unread[a.user_id]||0))||a.username.localeCompare(b.username));
-
-    const incomingPending = requestsCache.filter(r => r.recipient_id === currentUser.id && r.status === 'pending');
-    const outgoingPending = requestsCache.filter(r => r.sender_id === currentUser.id && r.status === 'pending');
-
-    let html = '';
-    if(incomingPending.length){
-      html += `<div class="esi-section-title">Incoming requests (${incomingPending.length})</div>`;
-      incomingPending.forEach(r => {
-        const sender = directoryCache.find(u => u.user_id === r.sender_id) || {username:'Someone', display_name:'Someone'};
-        html += `<div class="esi-user" style="cursor:default;background:#f0fdf4;margin-bottom:6px;"><span class="esi-avatar">${esc(ini(sender.display_name||sender.username))}</span><span><span class="esi-user-name">${esc(sender.display_name||sender.username)}</span><span class="esi-user-sub">Wants to connect</span></span><span style="margin-left:auto;display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${r.id}">Accept</button><button class="esi-request-btn deny" data-deny="${r.id}">Deny</button></span></div>`;
-      });
-    }
-    if(outgoingPending.length){
-      html += `<div class="esi-muted" style="font-size:12px;margin:6px 0 8px;">You have ${outgoingPending.length} pending request${outgoingPending.length>1?'s':''}.</div>`;
-    }
-    if(incomingPending.length || outgoingPending.length) html += `<div class="esi-section-title">Members</div>`;
-
-    dest.innerHTML = html + (list.length?list.map(u=>{
+    dest.innerHTML=list.length?list.map(u=>{
       const n=unread[u.user_id]||0;
-      const req = requestsCache.find(r =>
-        (r.sender_id === currentUser.id && r.recipient_id === u.user_id) ||
-        (r.recipient_id === currentUser.id && r.sender_id === u.user_id)
-      );
-      let actionHtml = '';
-      let canOpen = false;
-      if(req && req.status === 'accepted'){
-        actionHtml = '<span style="font-size:11px;color:#087443;font-weight:700;">Connected</span>';
-        canOpen = true;
-      } else if(req && req.status === 'pending' && req.sender_id === currentUser.id){
-        actionHtml = '<span class="esi-muted" style="font-size:11px;">Pending…</span>';
-      } else if(req && req.status === 'pending' && req.recipient_id === currentUser.id){
-        actionHtml = `<span style="display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${req.id}">Accept</button><button class="esi-request-btn deny" data-deny="${req.id}">Deny</button></span>`;
-      } else if(req && req.status === 'denied'){
-        actionHtml = '<span class="esi-muted" style="font-size:11px;">Declined</span>';
-      } else {
-        actionHtml = `<button class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button>`;
-      }
-      const sub = n ? plural(n,'new message') : (req&&req.status==='accepted' ? 'Connected' : 'Study Circle member');
-      return `<button class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}" ${canOpen?'':'style="cursor:default;"'}><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${esc(sub)}</span></span><span style="margin-left:auto">${actionHtml}</span></button>`;
-    }).join(''):'<p class="esi-muted">No opted-in members found yet.</p>');
-
-    dest.querySelectorAll('[data-peer]').forEach(btn=>{
-      if(btn.getAttribute('style') && btn.getAttribute('style').includes('cursor:default')) return;
-      btn.onclick=()=>{
-        const peer = list.find(u=>u.user_id===btn.dataset.peer);
-        if(peer) openChat(dmChat(peer));
-      };
+      return `<div class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}" role="button" tabindex="0"><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):'Study Circle member'}</span></span><span style="margin-left:auto"><button type="button" class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button></span></div>`;
+    }).join(''):'<p class="esi-muted">No opted-in members found yet. Try again later.</p>';
+    dest.querySelectorAll('[data-peer]').forEach(el=>el.onclick=(e)=>{
+      if(e.target.closest('[data-req]')) return;
+      e.preventDefault(); e.stopPropagation();
+      openChat(dmChat(list.find(u=>u.user_id===el.dataset.peer)));
     });
     dest.querySelectorAll('[data-req]').forEach(btn=>btn.onclick=async (e)=>{
-      e.stopPropagation();
-      const btnEl = e.currentTarget;
-      btnEl.disabled = true;
-      btnEl.textContent = 'Sending…';
+      e.preventDefault(); e.stopPropagation();
       try{
         const {error} = await supabase.from('chat_requests').insert({sender_id: currentUser.id, recipient_id: btn.dataset.req, status: 'pending'});
         if(error) throw error;
         status('Request sent!','esi-success');
-        await loadRequests();
-        renderList();
-      }catch(err){
-        status(err.message || 'Could not send request');
-        btnEl.disabled = false;
-        btnEl.textContent = 'Request';
-      }
-    });
-    dest.querySelectorAll('[data-accept]').forEach(btn=>btn.onclick=async (e)=>{
-      e.stopPropagation();
-      try{
-        const {error} = await supabase.from('chat_requests').update({status:'accepted'}).eq('id', btn.dataset.accept);
-        if(error) throw error;
-        status('Accepted! You can now message them.','esi-success');
-        await loadRequests();
-        renderList();
-      }catch(err){ status(err.message); }
-    });
-    dest.querySelectorAll('[data-deny]').forEach(btn=>btn.onclick=async (e)=>{
-      e.stopPropagation();
-      try{
-        const {error} = await supabase.from('chat_requests').update({status:'denied'}).eq('id', btn.dataset.deny);
-        if(error) throw error;
-        status('Request declined.','esi-success');
-        await loadRequests();
-        renderList();
       }catch(err){ status(err.message); }
     });
   }
@@ -429,12 +334,16 @@
     if(groupsOk===false){ dest.innerHTML='<p class="esi-muted">Groups need the latest database setup. Run the updated <code>supabase-schema.sql</code> in the Supabase SQL Editor, then press ↻.</p>'; return; }
     const q=(body.querySelector('#esi-search')?.value||'').toLowerCase();
     const list=groupsCache.filter(g=>g.name.toLowerCase().includes(q)).sort((a,b)=>((gunread[b.id]||0)-(gunread[a.id]||0))||a.name.localeCompare(b.name));
-    dest.innerHTML=`<button class="esi-btn esi-light" id="esi-new-group" style="width:100%;margin-bottom:8px">＋ New group</button>`+(list.length?list.map(g=>{
+    dest.innerHTML=`<button type="button" class="esi-btn esi-light" id="esi-new-group" style="width:100%;margin-bottom:8px">＋ New group</button>`+(list.length?list.map(g=>{
       const n=gunread[g.id]||0;
-      return `<button class="esi-user${n?' esi-has-unread':''}" data-gid="${esc(g.id)}"><span class="esi-avatar esi-gavatar" style="background:hsl(${hue(g.id)} 70% 90%);color:hsl(${hue(g.id)} 45% 28%)">${esc(ini(g.name))}</span><span><span class="esi-user-name">${esc(g.name)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):plural(g.count,'member')+(g.role==='admin'?' · you are admin':'')}</span></span><span style="margin-left:auto;color:#8291a3">›</span></button>`;
+      return `<div class="esi-user${n?' esi-has-unread':''}" data-gid="${esc(g.id)}" role="button" tabindex="0"><span class="esi-avatar esi-gavatar" style="background:hsl(${hue(g.id)} 70% 90%);color:hsl(${hue(g.id)} 45% 28%)">${esc(ini(g.name))}</span><span><span class="esi-user-name">${esc(g.name)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):plural(g.count,'member')+(g.role==='admin'?' · you are admin':'')}</span></span><span style="margin-left:auto;color:#8291a3">›</span></div>`;
     }).join(''):(groupsCache.length?'<p class="esi-muted">No groups match your search.</p>':'<p class="esi-muted">You are not in any groups yet. Create one to chat with several members at once.</p>'));
-    dest.querySelector('#esi-new-group').onclick=showNewGroup;
-    dest.querySelectorAll('[data-gid]').forEach(btn=>btn.onclick=()=>{ const g=groupsCache.find(x=>String(x.id)===btn.dataset.gid); if(g) openChat(groupChat(g)); });
+    const newGroupBtn = dest.querySelector('#esi-new-group');
+    if(newGroupBtn) newGroupBtn.onclick=(e)=>{ e.preventDefault(); e.stopPropagation(); showNewGroup(); };
+    dest.querySelectorAll('[data-gid]').forEach(el=>el.onclick=(e)=>{
+      e.preventDefault(); e.stopPropagation();
+      const g=groupsCache.find(x=>String(x.id)===el.dataset.gid); if(g) openChat(groupChat(g));
+    });
   }
   function renderPicker(box,candidates,picked,q,onChange){
     const list=candidates.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q.toLowerCase()));
@@ -445,13 +354,14 @@
   function showNewGroup(){
     closeTyping(); currentChat=null; body.classList.remove('esi-chat');
     const picked=new Set();
-    body.innerHTML=`<div class="esi-topline"><button class="esi-back" id="esi-back">← Groups</button><strong>New group</strong></div><input class="esi-field" id="esi-group-name" maxlength="40" placeholder="Group name (e.g. Class 9 Physics)" aria-label="Group name"><div class="esi-muted" style="margin:6px 0 2px">Add members <span id="esi-picked-count"></span></div><input class="esi-field" id="esi-pick-search" placeholder="Search members…" aria-label="Search members"><div class="esi-picklist" id="esi-pick-list"></div><div id="esi-status"></div><button class="esi-btn" id="esi-group-create" style="width:100%" disabled>Create group</button>`;
+    body.innerHTML=`<div class="esi-topline"><button type="button" class="esi-back" id="esi-back">← Groups</button><strong>New group</strong></div><input class="esi-field" id="esi-group-name" maxlength="40" placeholder="Group name (e.g. Class 9 Physics)" aria-label="Group name"><div class="esi-muted" style="margin:6px 0 2px">Add members <span id="esi-picked-count"></span></div><input class="esi-field" id="esi-pick-search" placeholder="Search members…" aria-label="Search members"><div class="esi-picklist" id="esi-pick-list"></div><div id="esi-status"></div><button type="button" class="esi-btn" id="esi-group-create" style="width:100%" disabled>Create group</button>`;
     const nameEl=body.querySelector('#esi-group-name'), searchEl=body.querySelector('#esi-pick-search'), listEl=body.querySelector('#esi-pick-list'), createEl=body.querySelector('#esi-group-create'), countEl=body.querySelector('#esi-picked-count');
     const refresh=()=>{ countEl.textContent=picked.size?`· ${picked.size} selected`:''; createEl.disabled=!(nameEl.value.trim()&&picked.size>=1); };
     const draw=()=>renderPicker(listEl,directoryCache,picked,searchEl.value,refresh);
     nameEl.oninput=refresh; searchEl.oninput=draw; draw(); refresh();
     body.querySelector('#esi-back').onclick=backToGroups;
-    createEl.onclick=async()=>{
+    createEl.onclick=async(e)=>{
+      e.preventDefault(); e.stopPropagation();
       createEl.disabled=true; createEl.textContent='Creating…';
       try{
         const {data,error}=await supabase.rpc('create_group',{p_name:nameEl.value.trim(),p_members:[...picked]}); if(error) throw error;
