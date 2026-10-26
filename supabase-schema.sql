@@ -402,3 +402,208 @@ create policy "group members send typing"
   );
 
 -- Never expose the service_role key in any frontend file.
+
+-- =====================================================================
+-- NEW: CHAT REQUESTS, BLOCKING, MESSAGE EDIT/DELETE
+-- For private messaging: users send requests, accept/deny, and can block.
+-- Messages can be edited or soft-deleted by the sender.
+-- =====================================================================
+
+create table if not exists public.chat_requests (
+  id bigint generated always as identity primary key,
+  sender_id uuid not null references auth.users(id) on delete cascade,
+  recipient_id uuid not null references auth.users(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending', 'accepted', 'denied')),
+  created_at timestamptz not null default now(),
+  unique (sender_id, recipient_id)
+);
+
+create table if not exists public.blocks (
+  blocker_id uuid not null references auth.users(id) on delete cascade,
+  blocked_id uuid not null references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (blocker_id, blocked_id)
+);
+
+-- Add edit support to messages
+alter table public.direct_messages add column if not exists edited_at timestamptz;
+alter table public.group_messages add column if not exists edited_at timestamptz;
+
+alter table public.chat_requests enable row level security;
+alter table public.blocks enable row level security;
+
+revoke all on public.chat_requests from anon;
+revoke all on public.blocks from anon;
+grant select, insert, update on public.chat_requests to authenticated;
+grant select, insert, delete on public.blocks to authenticated;
+
+-- Requests: sender and recipient can see
+drop policy if exists "participants see requests" on public.chat_requests;
+create policy "participants see requests"
+  on public.chat_requests for select to authenticated
+  using (sender_id = (select auth.uid()) or recipient_id = (select auth.uid()));
+
+drop policy if exists "senders create requests" on public.chat_requests;
+create policy "senders create requests"
+  on public.chat_requests for insert to authenticated
+  with check (sender_id = (select auth.uid()) and recipient_id <> (select auth.uid()));
+
+drop policy if exists "recipients update request status" on public.chat_requests;
+create policy "recipients update request status"
+  on public.chat_requests for update to authenticated
+  using (recipient_id = (select auth.uid()))
+  with check (recipient_id = (select auth.uid()));
+
+-- Blocks: only the blocker can manage
+drop policy if exists "users see own blocks" on public.blocks;
+create policy "users see own blocks"
+  on public.blocks for select to authenticated
+  using (blocker_id = (select auth.uid()));
+
+drop policy if exists "users create blocks" on public.blocks;
+create policy "users create blocks"
+  on public.blocks for insert to authenticated
+  with check (blocker_id = (select auth.uid()));
+
+drop policy if exists "users delete own blocks" on public.blocks;
+create policy "users delete own blocks"
+  on public.blocks for delete to authenticated
+  using (blocker_id = (select auth.uid()));
+
+-- Update message insert policy to require accepted request and no block
+drop policy if exists "senders create messages to listed members" on public.direct_messages;
+create policy "senders create messages to accepted contacts"
+  on public.direct_messages for insert to authenticated
+  with check (
+    sender_id = (select auth.uid())
+    and recipient_id <> (select auth.uid())
+    and exists (
+      select 1 from public.chat_requests r
+      where ((r.sender_id = (select auth.uid()) and r.recipient_id = recipient_id)
+          or (r.recipient_id = (select auth.uid()) and r.sender_id = recipient_id))
+        and r.status = 'accepted'
+    )
+    and not exists (
+      select 1 from public.blocks b
+      where (b.blocker_id = (select auth.uid()) and b.blocked_id = recipient_id)
+         or (b.blocker_id = recipient_id and b.blocked_id = (select auth.uid()))
+    )
+  );
+
+-- Allow sender to edit or delete own messages
+grant update (body, edited_at) on public.direct_messages to authenticated;
+grant delete on public.direct_messages to authenticated;
+grant update (body, edited_at) on public.group_messages to authenticated;
+grant delete on public.group_messages to authenticated;
+
+drop policy if exists "senders edit own messages" on public.direct_messages;
+create policy "senders edit own messages"
+  on public.direct_messages for update to authenticated
+  using (sender_id = (select auth.uid()))
+  with check (sender_id = (select auth.uid()));
+
+drop policy if exists "senders delete own messages" on public.direct_messages;
+create policy "senders delete own messages"
+  on public.direct_messages for delete to authenticated
+  using (sender_id = (select auth.uid()));
+
+drop policy if exists "senders edit own group messages" on public.group_messages;
+create policy "senders edit own group messages"
+  on public.group_messages for update to authenticated
+  using (sender_id = (select auth.uid()))
+  with check (sender_id = (select auth.uid()));
+
+drop policy if exists "senders delete own group messages" on public.group_messages;
+create policy "senders delete own group messages"
+  on public.group_messages for delete to authenticated
+  using (sender_id = (select auth.uid()));
+
+-- Add realtime for new tables if needed
+do $$
+begin
+  alter publication supabase_realtime add table public.chat_requests;
+exception when duplicate_object then null;
+end $$;
+
+-- =====================================================================
+-- PHASE 2: Moderation, Replies, Reactions, Presence, Mute, Multi-admin, Group meta
+-- =====================================================================
+
+-- Reports for admin moderation (manage manually in Supabase dashboard)
+create table if not exists public.reports (
+  id bigint generated always as identity primary key,
+  reporter_id uuid not null references auth.users(id) on delete cascade,
+  reported_user_id uuid references auth.users(id) on delete set null,
+  message_id bigint,
+  reason text not null check (char_length(reason) between 1 and 500),
+  status text not null default 'open' check (status in ('open','reviewed','closed')),
+  created_at timestamptz not null default now()
+);
+alter table public.reports enable row level security;
+revoke all on public.reports from anon;
+grant insert, select on public.reports to authenticated;
+drop policy if exists "users create reports" on public.reports;
+create policy "users create reports" on public.reports for insert to authenticated
+  with check (reporter_id = (select auth.uid()));
+drop policy if exists "users see own reports" on public.reports;
+create policy "users see own reports" on public.reports for select to authenticated
+  using (reporter_id = (select auth.uid()));
+
+-- Reply / quote support
+alter table public.direct_messages add column if not exists reply_to bigint references public.direct_messages(id) on delete set null;
+alter table public.group_messages add column if not exists reply_to bigint references public.group_messages(id) on delete set null;
+
+-- Read receipts already exist via read_at; add delivered_at for ✓
+alter table public.direct_messages add column if not exists delivered_at timestamptz;
+
+-- Last seen / online (updated by client heartbeat)
+alter table public.profiles add column if not exists last_seen_at timestamptz default now();
+
+-- Emoji reactions
+create table if not exists public.reactions (
+  id bigint generated always as identity primary key,
+  message_id bigint not null,
+  message_table text not null check (message_table in ('direct_messages','group_messages')),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  emoji text not null check (char_length(emoji) between 1 and 8),
+  created_at timestamptz not null default now(),
+  unique (message_id, message_table, user_id, emoji)
+);
+alter table public.reactions enable row level security;
+revoke all on public.reactions from anon;
+grant select, insert, delete on public.reactions to authenticated;
+drop policy if exists "members see reactions" on public.reactions;
+create policy "members see reactions" on public.reactions for select to authenticated using (true);
+drop policy if exists "users add reactions" on public.reactions;
+create policy "users add reactions" on public.reactions for insert to authenticated
+  with check (user_id = (select auth.uid()));
+drop policy if exists "users remove own reactions" on public.reactions;
+create policy "users remove own reactions" on public.reactions for delete to authenticated
+  using (user_id = (select auth.uid()));
+
+-- Mute group
+alter table public.group_members add column if not exists muted boolean not null default false;
+
+-- Multiple admins: already supported via role; add promote function
+create or replace function public.promote_to_admin(p_group bigint, p_user uuid)
+returns void language plpgsql security definer set search_path = '' as $$
+begin
+  if not public.is_group_admin(p_group) then raise exception 'Only admins can promote'; end if;
+  update public.group_members set role = 'admin'
+    where group_id = p_group and user_id = p_user;
+end;
+$$;
+grant execute on function public.promote_to_admin(bigint, uuid) to authenticated;
+
+-- Group pictures, descriptions, member limit already enforced
+alter table public.groups add column if not exists description text check (char_length(description) <= 200);
+alter table public.groups add column if not exists avatar_url text;
+
+-- Realtime for reactions and reports
+do $$
+begin
+  alter publication supabase_realtime add table public.reactions;
+exception when duplicate_object then null;
+end $$;
+
+-- Never expose the service_role key in any frontend file.
