@@ -1,4 +1,18 @@
 (() => {
+  // ---------- State (must be declared before any use) ----------
+  let supabase = null, currentUser = null, myName = 'Someone', loading = false;
+  let currentChat = null, tab = 'members';
+  let inbox = null, ginbox = null, tick = null, tickN = 0;
+  let typingCh = null, typingReady = false, lastTypingSent = 0; const typers = new Map();
+  let lastSig = null, divider = null, initialScroll = false, forceBottom = false, hasReadAt = true, groupsOk = null;
+  let unread = {}, gunread = {}, unreadSig = '';
+  let directoryCache = [], groupsCache = [];
+  let unlocked = localStorage.getItem('esi_unlocked') === 'true';
+  let darkMode = localStorage.getItem('esi_dark') === 'true';
+  let olderMessagesLoading = false;
+  let hasMoreMessages = false;
+  let pendingReply = null;
+
   const root = document.createElement('div'); root.id = 'esi-chat-root';
   root.innerHTML = `
     <section class="esi-panel" id="esi-panel" role="dialog" aria-label="Study Circle community" aria-modal="false">
@@ -19,20 +33,6 @@
     if(span) span.textContent = unlocked ? 'Study Circle' : 'Science Helper';
   }
   updateLauncherLabel();
-
-  // ---------- State ----------
-  let supabase = null, currentUser = null, myName = 'Someone', loading = false;
-  // currentChat: { kind:'dm', id:<peer user id>, peer, title, sub } | { kind:'group', id:<group id>, group, title, sub, lastRead }
-  let currentChat = null, tab = 'members';
-  let inbox = null, ginbox = null, tick = null, tickN = 0;                         // realtime inbox channel + polling fallback
-  let typingCh = null, typingReady = false, lastTypingSent = 0; const typers = new Map();
-  let lastSig = null, divider = null, initialScroll = false, forceBottom = false, hasReadAt = true, groupsOk = null;
-  let unread = {}, gunread = {}, unreadSig = '';                    // unread counts: by sender (DMs) and by group
-  let directoryCache = [], groupsCache = [];
-  let unlocked = localStorage.getItem('esi_unlocked') === 'true';
-  let darkMode = localStorage.getItem('esi_dark') === 'true';
-  let olderMessagesLoading = false;
-  let hasMoreMessages = false;
 
   // ---------- Helpers ----------
   const esc = (s='') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -524,7 +524,6 @@
     if(error) status(error.message); else loadMessages();
   }
 
-  let pendingReply = null;
   function startReply(id, chat){
     pendingReply = id;
     const input = body.querySelector('#esi-message-input');
