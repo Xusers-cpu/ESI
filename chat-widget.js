@@ -45,6 +45,36 @@
 
   // ---------- Helpers ----------
   const esc = (s='') => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  // Custom dialog that stays inside the chat panel and matches theme colors.
+  function showCustomDialog({title, message = "", input = false, defaultValue = "", confirmText = "OK", cancelText = "Cancel", danger = false} = {}){
+    return new Promise(resolve => {
+      const overlay = document.createElement("div");
+      overlay.className = "esi-dialog-overlay";
+      overlay.innerHTML = `<div class="esi-dialog" role="dialog" aria-modal="true" aria-labelledby="esi-dlg-title">
+        <div class="esi-dialog-title" id="esi-dlg-title">${esc(title)}</div>
+        ${message ? `<div class="esi-dialog-msg">${esc(message)}</div>` : ""}
+        ${input ? `<input class="esi-field" id="esi-dialog-input" value="${esc(defaultValue)}" aria-label="${esc(title)}">` : ""}
+        <div class="esi-dialog-actions">
+          <button type="button" class="esi-btn esi-light" id="esi-dialog-cancel">${esc(cancelText)}</button>
+          <button type="button" class="esi-btn${danger ? " esi-danger" : ""}" id="esi-dialog-ok">${esc(confirmText)}</button>
+        </div>
+      </div>`;
+      panel.appendChild(overlay);
+      const okBtn = overlay.querySelector("#esi-dialog-ok");
+      const cancelBtn = overlay.querySelector("#esi-dialog-cancel");
+      const inputEl = overlay.querySelector("#esi-dialog-input");
+      // Escape closes
+      const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(input ? null : false); } };
+      const close = (val) => { document.removeEventListener("keydown", onKey); overlay.remove(); resolve(val); };
+      okBtn.onclick = () => close(input ? (inputEl ? inputEl.value : "") : true);
+      cancelBtn.onclick = () => close(input ? null : false);
+      overlay.onclick = (e) => { if (e.target === overlay) close(input ? null : false); };
+      document.addEventListener("keydown", onKey);
+      if (inputEl) { setTimeout(() => { inputEl.focus(); inputEl.select(); }, 30); }
+      else setTimeout(() => okBtn.focus(), 30);
+    });
+  }
+
   const status = (msg, cls='esi-error') => { const el = body.querySelector('#esi-status'); if(el) el.innerHTML = `<div class="${cls}" role="status">${esc(msg)}</div>`; };
   const atBottom = el => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   const reducedMotion = () => window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -478,7 +508,7 @@
       }catch(err){ status(err.message); }
     };
     dest.querySelectorAll('[data-cancel]').forEach(btn=>btn.onclick=(e)=>{ e.stopPropagation(); dropRequest(btn.dataset.cancel,'Request cancelled.'); });
-    dest.querySelectorAll('[data-disconnect]').forEach(btn=>btn.onclick=(e)=>{ e.stopPropagation(); if(confirm('Remove this connection? You will both need a new request to chat again.')) dropRequest(btn.dataset.disconnect,'Connection removed.'); });
+    dest.querySelectorAll('[data-disconnect]').forEach(btn=>btn.onclick=async (e)=>{ e.stopPropagation(); const ok = await showCustomDialog({title:'Remove connection?', message:'You will both need a new request to chat again.', confirmText:'Remove', danger:true}); if(ok) dropRequest(btn.dataset.disconnect,'Connection removed.'); });
   }
   async function showDirectorySettings(){
     const {data:p,error}=await supabase.from('profiles').select('username,display_name,is_listed').eq('user_id',currentUser.id).single();if(error){status(error.message);return;}
@@ -567,7 +597,7 @@
       // Show the current mute setting
       (async()=>{ try{ const {data:mm}=await supabase.from('group_members').select('muted').eq('group_id',g.id).eq('user_id',currentUser.id).maybeSingle(); const c=body.querySelector('#esi-mute'); if(c&&mm) c.checked=!!mm.muted; }catch(_){} })();
       const reload=async()=>{ await loadGroups(true); showGroupInfo(groupsCache.find(x=>x.id===g.id)||g); };
-      body.querySelectorAll('[data-remove]').forEach(b=>b.onclick=async()=>{ if(!confirm('Remove this member from the group?')) return; try{ const {error}=await supabase.rpc('remove_group_member',{p_group:g.id,p_user:b.dataset.remove}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
+      body.querySelectorAll('[data-remove]').forEach(b=>b.onclick=async()=>{ const ok = await showCustomDialog({title:'Remove member?', message:'Remove this member from the group?', confirmText:'Remove', danger:true}); if(!ok) return; try{ const {error}=await supabase.rpc('remove_group_member',{p_group:g.id,p_user:b.dataset.remove}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
       body.querySelectorAll('[data-promote]').forEach(b=>b.onclick=async()=>{ try{ const {error}=await supabase.rpc('promote_to_admin',{p_group:g.id,p_user:b.dataset.promote}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
       body.querySelector('#esi-save-mute').onclick=async()=>{
         try{
@@ -585,7 +615,7 @@
         addSearch.oninput=draw; draw();
         addGo.onclick=async()=>{ addGo.disabled=true; try{ const {error}=await supabase.rpc('add_group_members',{p_group:g.id,p_members:[...picked]}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); refresh(); } };
       }
-      body.querySelector('#esi-leave').onclick=async()=>{ if(!confirm('Leave this group? You will stop receiving its messages.')) return; try{ const {error}=await supabase.rpc('leave_group',{p_group:g.id}); if(error) throw error; backToGroups(); }catch(e){ status(errText(e)); } };
+      body.querySelector('#esi-leave').onclick=async()=>{ const ok = await showCustomDialog({title:'Leave group?', message:'You will stop receiving its messages.', confirmText:'Leave', danger:true}); if(!ok) return; try{ const {error}=await supabase.rpc('leave_group',{p_group:g.id}); if(error) throw error; backToGroups(); }catch(e){ status(errText(e)); } };
     }catch(e){ status(errText(e)); }
   }
 
@@ -698,7 +728,7 @@
   }
 
   async function editMessage(id, chat){
-    const newBody = prompt('Edit message:', msgCache.get(String(id)) || '');
+    const newBody = await showCustomDialog({title:'Edit message', input:true, defaultValue: msgCache.get(String(id)) || '', confirmText:'Save'});
     if(!newBody || !newBody.trim()) return;
     const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
     const {error} = await supabase.from(table).update({body: newBody.trim(), edited_at: new Date().toISOString()}).eq('id', id);
@@ -706,7 +736,8 @@
   }
 
   async function deleteMessage(id, chat){
-    if(!confirm('Delete this message?')) return;
+    const ok = await showCustomDialog({title:'Delete message?', message:'This cannot be undone.', confirmText:'Delete', danger:true});
+    if(!ok) return;
     const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
     const {error} = await supabase.from(table).delete().eq('id', id);
     if(error) status(error.message); else { lastSig=null; loadMessages(); }
@@ -719,7 +750,7 @@
   }
 
   async function addReaction(mid, chat){
-    const emoji = prompt('Reaction emoji (e.g. 👍 or ❤️):','👍');
+    const emoji = await showCustomDialog({title:'Add reaction', message:'Enter an emoji (e.g. 👍 or ❤️)', input:true, defaultValue:'👍', confirmText:'Add'});
     if(!emoji) return;
     const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
     const {error} = await supabase.from('reactions').insert({message_id: mid, message_table: table, user_id: currentUser.id, emoji});
