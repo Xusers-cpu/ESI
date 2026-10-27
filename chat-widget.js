@@ -6,12 +6,15 @@
   let typingCh = null, typingReady = false, lastTypingSent = 0; const typers = new Map();
   let lastSig = null, divider = null, initialScroll = false, forceBottom = false, hasReadAt = true, groupsOk = null;
   let unread = {}, gunread = {}, unreadSig = '';
-  let directoryCache = [], groupsCache = [];
+  let directoryCache = [], groupsCache = [], requestsCache = [];
   let unlocked = localStorage.getItem('esi_unlocked') === 'true';
   let darkMode = localStorage.getItem('esi_dark') === 'true';
   let olderMessagesLoading = false;
   let hasMoreMessages = false;
+  let msgLimit = 150;
   let pendingReply = null;
+  let authListenerSet = false;
+  const msgCache = new Map();
 
   const root = document.createElement('div'); root.id = 'esi-chat-root';
   root.innerHTML = `
@@ -22,6 +25,10 @@
     </section>
     <button class="esi-launcher" id="esi-launcher" aria-expanded="false" aria-controls="esi-panel"><span class="esi-launch-icon">✦</span><span>Study Circle</span></button>`;
   document.body.appendChild(root);
+  // Member rows are <div role="button"> (a <button> cannot contain other <button>s); give them button-like basics.
+  const fixStyle = document.createElement('style');
+  fixStyle.textContent = '#esi-chat-root div.esi-user{width:100%;box-sizing:border-box;text-align:left;cursor:pointer;}';
+  document.head.appendChild(fixStyle);
   if(darkMode) root.classList.add('esi-dark');
   const panel = root.querySelector('#esi-panel'), launcher = root.querySelector('#esi-launcher'), body = root.querySelector('#esi-body');
   const introHTML = body.innerHTML;
@@ -51,16 +58,41 @@
   const groupChat = g => ({kind:'group', id:g.id, group:g, title:g.name, sub:plural(g.count||0,'member'), lastRead:g.last_read_at||''});
 
   const toggle = (open) => {
-    panel.classList.toggle('esi-open',open); launcher.setAttribute('aria-expanded',String(open));
-    if(open){
-      setTimeout(()=>{const f=panel.querySelector('input'); if(f) f.focus();},50);
-      if(currentUser){ if(currentChat) loadMessages(); else loadUnread(); }
+    panel.classList.toggle('esi-open', open);
+    launcher.setAttribute('aria-expanded', String(open));
+    if (open) {
+      if (!unlocked) {
+        showCoverChatbot();
+      } else if (currentUser) {
+        if (currentChat) loadMessages(); else loadUnread();
+      }
+      setTimeout(() => { const f = panel.querySelector('input'); if (f) f.focus(); }, 50);
+    } else {
+      // Lock again when panel closes
+      if (unlocked) {
+        localStorage.removeItem('esi_unlocked');
+        unlocked = false;
+        updateLauncherLabel();
+        currentChat = null;
+        stopRealtime();
+      }
     }
   };
-  launcher.addEventListener('click',()=>toggle(!panel.classList.contains('esi-open')));
-  root.querySelector('#esi-close').addEventListener('click',()=>toggle(false));
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')toggle(false)});
-  document.addEventListener('visibilitychange',()=>{ if(!document.hidden&&currentUser){ loadUnread(); if(currentChat) loadMessages(); } });
+  launcher.addEventListener('click', () => toggle(!panel.classList.contains('esi-open')));
+  root.querySelector('#esi-close').addEventListener('click', () => toggle(false));
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && panel.classList.contains('esi-open')) toggle(false); });
+  // Click outside the panel closes it (and locks).
+  // FIX: use composedPath(), which is captured at dispatch time. Clicking a member/group re-renders the
+  // panel, detaching the clicked element before this listener runs, so root.contains(e.target) was false
+  // and the panel wrongly closed.
+  document.addEventListener('click', (e) => {
+    if (!panel.classList.contains('esi-open')) return;
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    if (path.includes(root)) return;
+    if (root.contains(e.target)) return;
+    toggle(false);
+  });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && currentUser && unlocked) { loadUnread(); if (currentChat) loadMessages(); } });
 
   // ---------- Unread counters ----------
   function setCount(el,n){ if(!el) return; el.hidden=!n; el.textContent=n>99?'99+':String(n); }
@@ -140,6 +172,7 @@
       tickN++;
       loadUnread(); if(currentChat) loadMessages();
       if(groupsOk!==false&&(tab==='groups'||(currentChat&&currentChat.kind==='group')||tickN%5===0)) loadGroups();
+      if(tab==='members' && !currentChat && tickN%2===0) loadRequests().then(()=>{ if(body.querySelector('#esi-directory')) renderList(); });
     },4000);
   }
   // Group events live on their own channel so a missing groups table can never break direct-message delivery.
@@ -200,6 +233,7 @@
     body.classList.remove('esi-chat'); body.innerHTML=introHTML; authArea=body.querySelector('#esi-auth-area');
   }
   function setupMessage() {
+    ensureAuthArea();
     authArea.innerHTML = `<p class="esi-error">Study Circle isn't connected yet.</p><p class="esi-muted">To enable the member directory and messaging, add your Supabase project URL and public anon key in <code>supabase-config.js</code>, then run the included SQL setup script. Do not add a service-role key to a public website.</p><a href="SUPABASE_SETUP.md" target="_blank" rel="noopener" class="esi-muted">Open setup guide ↗</a>`;
   }
   function showAuth() {
@@ -215,14 +249,14 @@
           if(signup){
             const username=form.querySelector('#esi-username').value.trim();
             if(!/^[a-zA-Z0-9_]{3,24}$/.test(username)) throw new Error('Username must be 3–24 characters using letters, numbers or _.');
-            if(!form.querySelector('#esi-optin').checked) throw new Error('Please choose whether to join the member directory.');
+            const listed=form.querySelector('#esi-optin').checked;
             const {data,error}=await supabase.auth.signUp({email,password,options:{data:{username}}}); if(error) throw error;
             currentUser=data.user;
             if(!data.session){ status('Check your email to confirm your account, then return here to sign in.','esi-success'); }
-            else { await ensureProfile(username,true); await loadDirectory(); }
+            else { await ensureProfile(username,listed); showDirectoryShell(); await loadDirectory(); }
           } else { const {error}=await supabase.auth.signInWithPassword({email,password}); if(error) throw error; await initSession(); }
         } catch(e){ status(e.message || 'Could not complete this action.'); }
-        finally {btn.disabled=false;btn.textContent=signup?'Create account':'Sign in';}
+        finally { if(btn.isConnected){ btn.disabled=false; btn.textContent=signup?'Create account':'Sign in'; } }
       });
     };
     authArea.querySelector('#esi-signin-tab').onclick=()=>draw(false); authArea.querySelector('#esi-signup-tab').onclick=()=>draw(true); draw(false);
@@ -246,7 +280,7 @@
   function showProfileSetup(){
     ensureAuthArea();
     authArea.innerHTML=`<p><strong>Finish your community profile</strong></p><input class="esi-field" id="esi-profile-name" maxlength="24" placeholder="Username (3–24 characters)"><label class="esi-optin"><input type="checkbox" id="esi-profile-optin"><span>List me in the Study Circle directory. Other opted-in members can message me.</span></label><button class="esi-btn" id="esi-profile-save">Save profile</button><div id="esi-status"></div>`;
-    authArea.querySelector('#esi-profile-save').onclick=async()=>{try{const n=authArea.querySelector('#esi-profile-name').value.trim();if(!/^[a-zA-Z0-9_]{3,24}$/.test(n))throw Error('Use 3–24 letters, numbers or _.');await ensureProfile(n,authArea.querySelector('#esi-profile-optin').checked);await showDirectoryShell();await loadDirectory();}catch(e){status(e.message)}};
+    authArea.querySelector('#esi-profile-save').onclick=async()=>{try{const n=authArea.querySelector('#esi-profile-name').value.trim();if(!/^[a-zA-Z0-9_]{3,24}$/.test(n))throw Error('Use 3–24 letters, numbers or _.');await ensureProfile(n,authArea.querySelector('#esi-profile-optin').checked);showDirectoryShell();await loadDirectory();}catch(e){status(e.message)}};
   }
 
   // ---------- Directory (Members | Groups) ----------
@@ -256,7 +290,7 @@
     body.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
     body.querySelector('#esi-refresh').onclick=loadDirectory;
     body.querySelector('#esi-search').oninput=renderList;
-    body.querySelector('#esi-signout').onclick=async()=>{stopRealtime();await supabase.auth.signOut();currentUser=null;currentChat=null;unread={};gunread={};unreadSig='';groupsCache=[];directoryCache=[];groupsOk=null;renderBadges();showAuth();};
+    body.querySelector('#esi-signout').onclick=async()=>{stopRealtime();await supabase.auth.signOut();currentUser=null;currentChat=null;unread={};gunread={};unreadSig='';groupsCache=[];directoryCache=[];requestsCache=[];groupsOk=null;renderBadges();showAuth();};
     body.querySelector('#esi-profile-toggle').onclick=showDirectorySettings;
     applyTabUI(); renderTabCounts(); startRealtime();
   }
@@ -273,26 +307,107 @@
     const dest=body.querySelector('#esi-directory'); if(!dest)return; dest.innerHTML='<p class="esi-muted">Loading…</p>';
     await loadGroups(true);
     await loadUnread();
+    await loadRequests();
     try{const {data,error}=await supabase.from('profiles').select('user_id,username,display_name').eq('is_listed',true).neq('user_id',currentUser.id).order('username').limit(100);if(error)throw error;directoryCache=data||[];renderList();}
-    catch(e){dest.innerHTML=`<p class="esi-error">Could not load the directory. Check the Supabase tables and access policies.</p>`;}
+    catch(e){const d=body.querySelector('#esi-directory'); if(d) d.innerHTML=`<p class="esi-error">Could not load the directory. Check the Supabase tables and access policies.</p>`;}
+  }
+  async function loadRequests(){
+    if(!currentUser) return;
+    try{
+      const {data,error}=await supabase.from('chat_requests').select('id,sender_id,recipient_id,status,created_at').or(`sender_id.eq.${currentUser.id},recipient_id.eq.${currentUser.id}`);
+      if(error) throw error;
+      requestsCache = data || [];
+    }catch(e){ requestsCache = []; }
   }
   function filterDirectory(){
     const dest=body.querySelector('#esi-directory');if(!dest)return;
     const q=(body.querySelector('#esi-search')?.value||'').toLowerCase();
-    // Members who wrote to you first, then everyone else alphabetically.
     const list=directoryCache.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q))
       .sort((a,b)=>((unread[b.user_id]||0)-(unread[a.user_id]||0))||a.username.localeCompare(b.username));
-    dest.innerHTML=list.length?list.map(u=>{
+
+    const incomingPending = requestsCache.filter(r => r.recipient_id === currentUser.id && r.status === 'pending');
+    const outgoingPending = requestsCache.filter(r => r.sender_id === currentUser.id && r.status === 'pending');
+
+    let html = '';
+    if(incomingPending.length){
+      html += `<div class="esi-section-title">Incoming requests (${incomingPending.length})</div>`;
+      incomingPending.forEach(r => {
+        const sender = directoryCache.find(u => u.user_id === r.sender_id) || {username:'Someone', display_name:'Someone'};
+        html += `<div class="esi-user" style="cursor:default;background:#f0fdf4;margin-bottom:6px;"><span class="esi-avatar">${esc(ini(sender.display_name||sender.username))}</span><span><span class="esi-user-name">${esc(sender.display_name||sender.username)}</span><span class="esi-user-sub">Wants to connect</span></span><span style="margin-left:auto;display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${esc(r.id)}">Accept</button><button class="esi-request-btn deny" data-deny="${esc(r.id)}">Deny</button></span></div>`;
+      });
+    }
+    if(outgoingPending.length){
+      html += `<div class="esi-muted" style="font-size:12px;margin:6px 0 8px;">You have ${outgoingPending.length} pending request${outgoingPending.length>1?'s':''}.</div>`;
+    }
+    if(incomingPending.length || outgoingPending.length) html += `<div class="esi-section-title">Members</div>`;
+
+    // FIX: rows are <div role="button"> because they contain real <button>s (Request/Accept/Deny);
+    // nested <button>s are invalid HTML and the parser splits them, breaking the row and its clicks.
+    dest.innerHTML = html + (list.length?list.map(u=>{
       const n=unread[u.user_id]||0;
-      return `<button class="esi-user${n?' esi-has-unread':''}" data-peer="${esc(u.user_id)}"><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge" aria-label="${plural(n,'unread message')}">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${n?plural(n,'new message'):'Study Circle member'}</span></span><span style="margin-left:auto"><button class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button></span></button>`;
-    }).join(''):'<p class="esi-muted">No opted-in members found yet. Try again later.</p>';
-    dest.querySelectorAll('[data-peer]').forEach(btn=>btn.onclick=()=>openChat(dmChat(list.find(u=>u.user_id===btn.dataset.peer))));
+      const req = requestsCache.find(r =>
+        (r.sender_id === currentUser.id && r.recipient_id === u.user_id) ||
+        (r.recipient_id === currentUser.id && r.sender_id === u.user_id)
+      );
+      let actionHtml = '';
+      let canOpen = false;
+      if(req && req.status === 'accepted'){
+        actionHtml = '<span style="font-size:11px;color:#087443;font-weight:700;">Connected</span>';
+        canOpen = true;
+      } else if(req && req.status === 'pending' && req.sender_id === currentUser.id){
+        actionHtml = '<span class="esi-muted" style="font-size:11px;">Pending…</span>';
+      } else if(req && req.status === 'pending' && req.recipient_id === currentUser.id){
+        actionHtml = `<span style="display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${esc(req.id)}">Accept</button><button class="esi-request-btn deny" data-deny="${esc(req.id)}">Deny</button></span>`;
+      } else if(req && req.status === 'denied'){
+        actionHtml = '<span class="esi-muted" style="font-size:11px;">Declined</span>';
+      } else {
+        actionHtml = `<button class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button>`;
+      }
+      const sub = n ? plural(n,'new message') : (req&&req.status==='accepted' ? 'Connected' : 'Study Circle member');
+      const open = canOpen ? `data-peer="${esc(u.user_id)}" role="button" tabindex="0"` : 'style="cursor:default;"';
+      return `<div class="esi-user${n?' esi-has-unread':''}" ${open}><span class="esi-avatar">${esc(ini(u.display_name||u.username))}</span><span><span class="esi-user-name">${esc(u.display_name||u.username)}${n?`<span class="esi-badge">${n>99?'99+':n}</span>`:''}</span><span class="esi-user-sub">${esc(sub)}</span></span><span style="margin-left:auto">${actionHtml}</span></div>`;
+    }).join(''):'<p class="esi-muted">No opted-in members found yet.</p>');
+
+    dest.querySelectorAll('[data-peer]').forEach(el=>{
+      const go=()=>{ const peer = directoryCache.find(u=>u.user_id===el.dataset.peer); if(peer) openChat(dmChat(peer)); };
+      el.onclick=go;
+      el.onkeydown=e=>{ if((e.key==='Enter'||e.key===' ')&&e.target===el){ e.preventDefault(); go(); } };
+    });
     dest.querySelectorAll('[data-req]').forEach(btn=>btn.onclick=async (e)=>{
       e.stopPropagation();
+      const btnEl = e.currentTarget;
+      btnEl.disabled = true;
+      btnEl.textContent = 'Sending…';
       try{
         const {error} = await supabase.from('chat_requests').insert({sender_id: currentUser.id, recipient_id: btn.dataset.req, status: 'pending'});
         if(error) throw error;
+        await loadRequests();
+        renderList();
         status('Request sent!','esi-success');
+      }catch(err){
+        status(err.message || 'Could not send request');
+        btnEl.disabled = false;
+        btnEl.textContent = 'Request';
+      }
+    });
+    dest.querySelectorAll('[data-accept]').forEach(btn=>btn.onclick=async (e)=>{
+      e.stopPropagation();
+      try{
+        const {error} = await supabase.from('chat_requests').update({status:'accepted'}).eq('id', btn.dataset.accept);
+        if(error) throw error;
+        await loadRequests();
+        renderList();
+        status('Accepted! You can now message them.','esi-success');
+      }catch(err){ status(err.message); }
+    });
+    dest.querySelectorAll('[data-deny]').forEach(btn=>btn.onclick=async (e)=>{
+      e.stopPropagation();
+      try{
+        const {error} = await supabase.from('chat_requests').update({status:'denied'}).eq('id', btn.dataset.deny);
+        if(error) throw error;
+        await loadRequests();
+        renderList();
+        status('Request declined.','esi-success');
       }catch(err){ status(err.message); }
     });
   }
@@ -380,6 +495,8 @@
         <div id="esi-status"></div>
         <div class="esi-actions"><button class="esi-btn esi-danger" id="esi-leave">Leave group</button></div>`;
       body.querySelector('#esi-back').onclick=()=>openChat(groupChat(freshGroup(g)));
+      // Show the current mute setting
+      (async()=>{ try{ const {data:mm}=await supabase.from('group_members').select('muted').eq('group_id',g.id).eq('user_id',currentUser.id).maybeSingle(); const c=body.querySelector('#esi-mute'); if(c&&mm) c.checked=!!mm.muted; }catch(_){} })();
       const reload=async()=>{ await loadGroups(true); showGroupInfo(groupsCache.find(x=>x.id===g.id)||g); };
       body.querySelectorAll('[data-remove]').forEach(b=>b.onclick=async()=>{ if(!confirm('Remove this member from the group?')) return; try{ const {error}=await supabase.rpc('remove_group_member',{p_group:g.id,p_user:b.dataset.remove}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
       body.querySelectorAll('[data-promote]').forEach(b=>b.onclick=async()=>{ try{ const {error}=await supabase.rpc('promote_to_admin',{p_group:g.id,p_user:b.dataset.promote}); if(error) throw error; await reload(); }catch(e){ status(errText(e)); } });
@@ -406,7 +523,7 @@
   // ---------- Conversation (direct or group) ----------
   async function openChat(chat){
     if(!chat||(chat.kind==='dm'&&!chat.peer)) return;
-    currentChat=chat; lastSig=null; initialScroll=false; divider=null; forceBottom=false;
+    currentChat=chat; lastSig=null; initialScroll=false; divider=null; forceBottom=false; msgLimit=150; hasMoreMessages=false; pendingReply=null;
     body.classList.add('esi-chat');
     const isGroup=chat.kind==='group';
     const avatar=isGroup?`<span class="esi-avatar esi-gavatar" style="background:hsl(${hue(chat.id)} 70% 90%);color:hsl(${hue(chat.id)} 45% 28%)">${esc(ini(chat.title))}</span>`:`<span class="esi-avatar">${esc(ini(chat.title))}</span>`;
@@ -422,8 +539,9 @@
       loading=true; sendTyping(false);
       try{
         const row = isGroup ? {group_id:chat.id,sender_id:currentUser.id,body:message} : {sender_id:currentUser.id,recipient_id:chat.id,body:message};
-        if(pendingReply){ row.reply_to = pendingReply; pendingReply = null; input.placeholder = 'Write a study-related message…'; }
+        if(pendingReply){ row.reply_to = pendingReply; }
         const {error}=await supabase.from(isGroup?'group_messages':'direct_messages').insert(row); if(error) throw error;
+        pendingReply = null; input.placeholder = 'Write a study-related message…';
         input.value=''; forceBottom=true; await loadMessages();
       }catch(err){ status(err.message||'Message could not be sent.'); }
       finally{ loading=false; }
@@ -431,22 +549,19 @@
     openTyping(chat);
     await loadMessages();
   }
-  async function fetchMessages(chat, before=null){
+  async function fetchMessages(chat){
     let run;
     if(chat.kind==='group'){
-      run=()=>supabase.from('group_messages').select('id,sender_id,sender_name,body,created_at,edited_at').eq('group_id',chat.id).order('created_at',{ascending:false}).limit(150);
+      run=()=>supabase.from('group_messages').select('id,sender_id,sender_name,body,created_at,edited_at').eq('group_id',chat.id).order('created_at',{ascending:false}).limit(msgLimit);
     } else {
       run=()=>supabase.from('direct_messages').select(hasReadAt?'id,sender_id,recipient_id,body,created_at,read_at,edited_at':'id,sender_id,recipient_id,body,created_at,edited_at')
         .or(`and(sender_id.eq.${currentUser.id},recipient_id.eq.${chat.id}),and(sender_id.eq.${chat.id},recipient_id.eq.${currentUser.id})`)
-        .order('created_at',{ascending:false}).limit(150);
-    }
-    if(before){
-      // for older: need to adjust the query, but for simplicity, re-fetch and slice or use .lt
-      // Note: full implementation would use .lt('created_at', before)
+        .order('created_at',{ascending:false}).limit(msgLimit);
     }
     let {data,error}=await run();
     if(error&&chat.kind==='dm'&&hasReadAt&&(error.code==='42703'||/read_at/.test(error.message||''))){ hasReadAt=false; ({data,error}=await run()); }
     if(error) throw error;
+    hasMoreMessages = (data||[]).length>=msgLimit;
     return (data||[]).slice().reverse();
   }
   async function loadMessages(){
@@ -460,19 +575,20 @@
         const fu=data.find(m=>isUnread(chat,m));
         divider=fu?{id:fu.id,count:data.filter(m=>isUnread(chat,m)).length}:null;
       }
-      const sig=data.map(m=>m.id).join(',');
+      msgCache.clear(); data.forEach(m=>msgCache.set(String(m.id),m.body));
+      const sig=data.map(m=>m.id+(m.edited_at||'')).join(',')+(hasMoreMessages?'+':'');
       if(sig!==lastSig){
         const wasAtBottom=atBottom(box), prevTop=box.scrollTop, stick=wasAtBottom||forceBottom; forceBottom=false;
         lastSig=sig;
-        box.innerHTML=data.length? (hasMoreMessages ? '<button class="esi-load-earlier" id="esi-load-earlier">Load earlier messages</button>' : '') + data.map(m=>{
+        box.innerHTML=data.length? (hasMoreMessages ? '<button type="button" class="esi-load-earlier" id="esi-load-earlier">Load earlier messages</button>' : '') + data.map(m=>{
           const mine=m.sender_id===currentUser.id;
           const who=(chat.kind==='group'&&!mine)?`<span class="esi-sender" style="color:hsl(${hue(m.sender_id)} 45% 32%)">${esc(m.sender_name||'Former member')}</span>`:'';
           const edited = m.edited_at ? ' <small>(edited)</small>' : '';
           const quote = m.reply_to ? `<div class="esi-quote">↩ Quoted message</div>` : '';
-          const ticks = mine ? `<span class="esi-ticks${m.read_at?' read':''}">${m.read_at?'✓✓':'✓'}</span>` : '';
-          const actions = mine ? `<div class="esi-bubble-actions"><button data-reply="${m.id}">↩</button><button data-react="${m.id}">😊</button><button data-edit="${m.id}">✎</button><button data-del="${m.id}">✕</button></div>` : `<div class="esi-bubble-actions"><button data-reply="${m.id}">↩</button><button data-react="${m.id}">😊</button></div>`;
+          const ticks = (mine && chat.kind==='dm') ? `<span class="esi-ticks${m.read_at?' read':''}">${m.read_at?'✓✓':'✓'}</span>` : '';
+          const actions = mine ? `<div class="esi-bubble-actions"><button type="button" data-reply="${esc(m.id)}">↩</button><button type="button" data-react="${esc(m.id)}">😊</button><button type="button" data-edit="${esc(m.id)}">✎</button><button type="button" data-del="${esc(m.id)}">✕</button></div>` : `<div class="esi-bubble-actions"><button type="button" data-reply="${esc(m.id)}">↩</button><button type="button" data-react="${esc(m.id)}">😊</button></div>`;
           return (divider&&m.id===divider.id?`<div class="esi-unread-divider" id="esi-unread-divider" role="separator"><span>${plural(divider.count,'new message')}</span></div>`:'')+
-            `<div class="esi-bubble ${mine?'esi-mine':'esi-theirs'}">${quote}${who}${esc(m.body).replace(/\n/g,'<br>')}${edited}<span class="esi-time">${new Date(m.created_at).toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'})}${ticks}</span>${actions}<div class="esi-reactions" data-mid="${m.id}"></div></div>`;
+            `<div class="esi-bubble ${mine?'esi-mine':'esi-theirs'}">${quote}${who}${esc(m.body).replace(/\n/g,'<br>')}${edited}<span class="esi-time">${new Date(m.created_at).toLocaleString([], {hour:'2-digit',minute:'2-digit',month:'short',day:'numeric'})}${ticks}</span>${actions}<div class="esi-reactions" data-mid="${esc(m.id)}"></div></div>`;
         }).join(''):'<p class="esi-muted">Start with a question about a science topic or homework.</p>';
         // Bind actions
         const loadBtn = box.querySelector('#esi-load-earlier');
@@ -496,32 +612,32 @@
       }
       initialScroll=true;
       if(viewingChat()&&data.some(m=>isUnread(chat,m))) markRead(chat,data);   // auto-mark as read
-    }catch(e){box.innerHTML='<p class="esi-error">Messages could not load. Check your Supabase policies and Realtime setup.</p>';}
+    }catch(e){ if(box.isConnected && currentChat===chat) box.innerHTML='<p class="esi-error">Messages could not load. Check your Supabase policies and Realtime setup.</p>'; }
   }
 
   async function loadOlderMessages(chat){
     if(olderMessagesLoading) return;
     olderMessagesLoading = true;
-    // Simple implementation: for full pagination, query with .lt('created_at', oldest.created_at).limit(50)
-    // Then prepend to the list. For this demo, we note the feature is supported in schema.
-    status('Loading earlier messages…','esi-success');
-    olderMessagesLoading = false;
-    hasMoreMessages = false; // after one load, or check count
+    try{
+      msgLimit += 100;
+      lastSig = null;
+      await loadMessages();
+    } finally { olderMessagesLoading = false; }
   }
 
   async function editMessage(id, chat){
-    const newBody = prompt('Edit message:');
+    const newBody = prompt('Edit message:', msgCache.get(String(id)) || '');
     if(!newBody || !newBody.trim()) return;
     const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
     const {error} = await supabase.from(table).update({body: newBody.trim(), edited_at: new Date().toISOString()}).eq('id', id);
-    if(error) status(error.message); else loadMessages();
+    if(error) status(error.message); else { lastSig=null; loadMessages(); }
   }
 
   async function deleteMessage(id, chat){
     if(!confirm('Delete this message?')) return;
     const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
     const {error} = await supabase.from(table).delete().eq('id', id);
-    if(error) status(error.message); else loadMessages();
+    if(error) status(error.message); else { lastSig=null; loadMessages(); }
   }
 
   function startReply(id, chat){
@@ -541,14 +657,15 @@
 
   async function loadReactions(box, chat){
     if(!box) return;
+    const ids=[...box.querySelectorAll('[data-mid]')].map(el=>el.dataset.mid);
+    if(!ids.length) return;
     const table = chat.kind==='group' ? 'group_messages' : 'direct_messages';
-    const {data} = await supabase.from('reactions').select('message_id,emoji,user_id').eq('message_table', table);
-    if(!data) return;
+    const {data} = await supabase.from('reactions').select('message_id,emoji,user_id').eq('message_table', table).in('message_id', ids);
+    if(!data || currentChat!==chat || !box.isConnected) return;
     const map = {};
-    data.forEach(r => { if(!map[r.message_id]) map[r.message_id]=[]; map[r.message_id].push(r); });
+    data.forEach(r => { const k=String(r.message_id); if(!map[k]) map[k]=[]; map[k].push(r); });
     box.querySelectorAll('[data-mid]').forEach(el => {
-      const mid = el.dataset.mid;
-      const rs = map[mid] || [];
+      const rs = map[el.dataset.mid] || [];
       el.innerHTML = rs.map(r => `<span class="esi-reaction${r.user_id===currentUser.id?' mine':''}">${esc(r.emoji)}</span>`).join('');
     });
   }
@@ -560,26 +677,31 @@
 
   // Online / last seen heartbeat
   setInterval(async () => {
-    if(currentUser && unlocked){
-      await supabase.from('profiles').update({last_seen_at: new Date().toISOString()}).eq('user_id', currentUser.id);
+    if(supabase && currentUser && unlocked){
+      try{ await supabase.from('profiles').update({last_seen_at: new Date().toISOString()}).eq('user_id', currentUser.id); }catch(_){}
     }
   }, 60000);
 
   async function start(){
     const url=window.ESI_SUPABASE_URL,key=window.ESI_SUPABASE_ANON_KEY;
-    if(!url||!key||url.includes('YOUR_SUPABASE')||key.includes('YOUR_SUPABASE')||!window.supabase?.createClient){setupMessage();return;}
-    supabase=window.supabase.createClient(url,key);
+    if(!url||!key||url.includes('YOUR_SUPABASE')||key.includes('YOUR_SUPABASE')||!window.supabase?.createClient){ if(unlocked) setupMessage(); else showCoverChatbot(); return; }
+    if(!supabase) supabase=window.supabase.createClient(url,key);
     if(!unlocked){ showCoverChatbot(); return; }
     showAuth();
     try{const {data:{session}}=await supabase.auth.getSession();if(session)await initSession();}catch(e){status('Could not connect to Study Circle. Check your Supabase configuration.');}
-    supabase.auth.onAuthStateChange((event,session)=>{
-      if(event==='SIGNED_IN'&&session){ if(currentUser&&currentUser.id===session.user.id) return; setTimeout(()=>initSession().catch(e=>status(e.message)),0); }
-      if(event==='SIGNED_OUT'){ stopRealtime(); }
-    });
+    if(!authListenerSet){
+      authListenerSet=true;
+      supabase.auth.onAuthStateChange((event,session)=>{
+        if(!unlocked) return;
+        if(event==='SIGNED_IN'&&session){ if(currentUser&&currentUser.id===session.user.id) return; setTimeout(()=>initSession().catch(e=>status(e.message)),0); }
+        if(event==='SIGNED_OUT'){ stopRealtime(); }
+      });
+    }
   }
 
   // ---------- Cover Chatbot & Secret Unlock ----------
   function showCoverChatbot(){
+    closeTyping(); currentChat=null; body.classList.remove('esi-chat');
     body.innerHTML = `<div class="esi-note esi-muted">Hi! I'm your science helper for CBSE Classes 9-10. Ask me about cells, electricity, light, sound, magnetism or motion!</div><div id="esi-chat-messages" class="esi-message-list" style="min-height:200px;max-height:300px;overflow:auto;margin:10px 0;"></div><form class="esi-compose" id="esi-bot-compose"><input class="esi-field" id="esi-bot-input" maxlength="200" placeholder="Ask a science question…" aria-label="Question"><button class="esi-btn" type="submit">Ask</button></form><div id="esi-status"></div>`;
     const messages = body.querySelector('#esi-chat-messages');
     const form = body.querySelector('#esi-bot-compose');
@@ -595,17 +717,18 @@
     form.onsubmit = async e => {
       e.preventDefault();
       const q = input.value.trim(); if(!q) return;
-      addBotMsg(q, true);
       input.value = '';
       const pass = ['07092011','131111'];
       if(pass.includes(q)){
+        // Don't echo the passcode into the visible chat log.
         localStorage.setItem('esi_unlocked','true');
         unlocked = true;
         updateLauncherLabel();
-        addBotMsg('Access granted! Loading Study Circle…');
-        setTimeout(()=> { start(); }, 800); // re-init
+        addBotMsg('Loading…');
+        setTimeout(()=> { start(); }, 400);
         return;
       }
+      addBotMsg(q, true);
       const reply = getScienceReply(q);
       addBotMsg(reply);
     };
