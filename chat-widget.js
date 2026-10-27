@@ -12,6 +12,7 @@
   let olderMessagesLoading = false;
   let hasMoreMessages = false;
   let msgLimit = 150;
+  let extraCache = [];   // profiles of connected people who are not listed in the public directory
   let pendingReply = null;
   let authListenerSet = false;
   const msgCache = new Map();
@@ -55,6 +56,8 @@
   const errText = e => (e && e.message) ? e.message : 'Something went wrong. Please try again.';
   const dmChat = peer => ({kind:'dm', id:peer.user_id, peer, title:peerName(peer), sub:'Study Circle member'});
   const freshGroup = g => groupsCache.find(x=>x.id===g.id) || g;
+  const findPerson = id => directoryCache.find(u=>u.user_id===id) || extraCache.find(u=>u.user_id===id);
+  const isConnected = id => requestsCache.some(r => r.status==='accepted' && ((r.sender_id===id&&r.recipient_id===currentUser.id)||(r.recipient_id===id&&r.sender_id===currentUser.id)));
   const groupChat = g => ({kind:'group', id:g.id, group:g, title:g.name, sub:plural(g.count||0,'member'), lastRead:g.last_read_at||''});
 
   const toggle = (open) => {
@@ -173,6 +176,10 @@
       loadUnread(); if(currentChat) loadMessages();
       if(groupsOk!==false&&(tab==='groups'||(currentChat&&currentChat.kind==='group')||tickN%5===0)) loadGroups();
       if(tab==='members' && !currentChat && tickN%2===0) loadRequests().then(()=>{ if(body.querySelector('#esi-directory')) renderList(); });
+      // If the other person removed the connection while this DM is open, leave the chat.
+      if(currentChat && currentChat.kind==='dm' && tickN%2===0) loadRequests().then(ok=>{
+        if(ok && currentChat && currentChat.kind==='dm' && !isConnected(currentChat.id)){ tab='members'; showDirectoryShell(); loadDirectory().then(()=>status('This connection was removed.')); }
+      });
     },4000);
   }
   // Group events live on their own channel so a missing groups table can never break direct-message delivery.
@@ -290,7 +297,7 @@
     body.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>setTab(b.dataset.tab));
     body.querySelector('#esi-refresh').onclick=loadDirectory;
     body.querySelector('#esi-search').oninput=renderList;
-    body.querySelector('#esi-signout').onclick=async()=>{stopRealtime();await supabase.auth.signOut();currentUser=null;currentChat=null;unread={};gunread={};unreadSig='';groupsCache=[];directoryCache=[];requestsCache=[];groupsOk=null;renderBadges();showAuth();};
+    body.querySelector('#esi-signout').onclick=async()=>{stopRealtime();await supabase.auth.signOut();currentUser=null;currentChat=null;unread={};gunread={};unreadSig='';groupsCache=[];directoryCache=[];requestsCache=[];extraCache=[];groupsOk=null;renderBadges();showAuth();};
     body.querySelector('#esi-profile-toggle').onclick=showDirectorySettings;
     applyTabUI(); renderTabCounts(); startRealtime();
   }
@@ -307,22 +314,33 @@
     const dest=body.querySelector('#esi-directory'); if(!dest)return; dest.innerHTML='<p class="esi-muted">Loading…</p>';
     await loadGroups(true);
     await loadUnread();
+    try{const {data,error}=await supabase.from('profiles').select('user_id,username,display_name').eq('is_listed',true).neq('user_id',currentUser.id).order('username').limit(100);if(error)throw error;directoryCache=data||[];}
+    catch(e){const d=body.querySelector('#esi-directory'); if(d) d.innerHTML=`<p class="esi-error">Could not load the directory. Check the Supabase tables and access policies.</p>`; return;}
     await loadRequests();
-    try{const {data,error}=await supabase.from('profiles').select('user_id,username,display_name').eq('is_listed',true).neq('user_id',currentUser.id).order('username').limit(100);if(error)throw error;directoryCache=data||[];renderList();}
-    catch(e){const d=body.querySelector('#esi-directory'); if(d) d.innerHTML=`<p class="esi-error">Could not load the directory. Check the Supabase tables and access policies.</p>`;}
+    renderList();
   }
+  // Returns true on success. On failure the previous cache is kept (so a network blip never looks like "everyone disconnected").
   async function loadRequests(){
-    if(!currentUser) return;
+    if(!currentUser) return false;
     try{
       const {data,error}=await supabase.from('chat_requests').select('id,sender_id,recipient_id,status,created_at').or(`sender_id.eq.${currentUser.id},recipient_id.eq.${currentUser.id}`);
       if(error) throw error;
       requestsCache = data || [];
-    }catch(e){ requestsCache = []; }
+      // Connected people must stay reachable even if they later un-list themselves from the directory.
+      const known = new Set(directoryCache.map(u=>u.user_id));
+      const need = [...new Set(requestsCache.map(r=>r.sender_id===currentUser.id?r.recipient_id:r.sender_id))].filter(id=>!known.has(id));
+      if(need.length){
+        try{ const {data:ps,error:pe}=await supabase.from('profiles').select('user_id,username,display_name').in('user_id',need); if(!pe) extraCache=ps||[]; }catch(_){}
+      } else extraCache=[];
+      return true;
+    }catch(e){ return false; }
   }
   function filterDirectory(){
     const dest=body.querySelector('#esi-directory');if(!dest)return;
     const q=(body.querySelector('#esi-search')?.value||'').toLowerCase();
-    const list=directoryCache.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q))
+    const connectedIds=new Set(requestsCache.filter(r=>r.status==='accepted').map(r=>r.sender_id===currentUser.id?r.recipient_id:r.sender_id));
+    const everyone=[...directoryCache, ...extraCache.filter(u=>connectedIds.has(u.user_id)&&!directoryCache.some(d=>d.user_id===u.user_id))];
+    const list=everyone.filter(u=>(u.username+' '+(u.display_name||'')).toLowerCase().includes(q))
       .sort((a,b)=>((unread[b.user_id]||0)-(unread[a.user_id]||0))||a.username.localeCompare(b.username));
 
     const incomingPending = requestsCache.filter(r => r.recipient_id === currentUser.id && r.status === 'pending');
@@ -332,8 +350,8 @@
     if(incomingPending.length){
       html += `<div class="esi-section-title">Incoming requests (${incomingPending.length})</div>`;
       incomingPending.forEach(r => {
-        const sender = directoryCache.find(u => u.user_id === r.sender_id) || {username:'Someone', display_name:'Someone'};
-        html += `<div class="esi-user" style="cursor:default;background:#f0fdf4;margin-bottom:6px;"><span class="esi-avatar">${esc(ini(sender.display_name||sender.username))}</span><span><span class="esi-user-name">${esc(sender.display_name||sender.username)}</span><span class="esi-user-sub">Wants to connect</span></span><span style="margin-left:auto;display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${esc(r.id)}">Accept</button><button class="esi-request-btn deny" data-deny="${esc(r.id)}">Deny</button></span></div>`;
+        const sender = findPerson(r.sender_id) || {username:'Someone', display_name:'Someone'};
+        html += `<div class="esi-user esi-incoming" style="cursor:default;margin-bottom:6px;"><span class="esi-avatar">${esc(ini(sender.display_name||sender.username))}</span><span><span class="esi-user-name">${esc(sender.display_name||sender.username)}</span><span class="esi-user-sub">Wants to connect</span></span><span style="margin-left:auto;display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${esc(r.id)}">Accept</button><button class="esi-request-btn deny" data-deny="${esc(r.id)}">Deny</button></span></div>`;
       });
     }
     if(outgoingPending.length){
@@ -352,14 +370,17 @@
       let actionHtml = '';
       let canOpen = false;
       if(req && req.status === 'accepted'){
-        actionHtml = '<span style="font-size:11px;color:#087443;font-weight:700;">Connected</span>';
+        actionHtml = `<span style="display:flex;align-items:center;gap:6px;"><span style="font-size:11px;color:#087443;font-weight:700;">Connected</span><button class="esi-request-btn" data-disconnect="${esc(req.id)}" title="Remove connection">Remove</button></span>`;
         canOpen = true;
       } else if(req && req.status === 'pending' && req.sender_id === currentUser.id){
-        actionHtml = '<span class="esi-muted" style="font-size:11px;">Pending…</span>';
+        actionHtml = `<span style="display:flex;align-items:center;gap:6px;"><span class="esi-muted" style="font-size:11px;">Pending…</span><button class="esi-request-btn" data-cancel="${esc(req.id)}">Cancel</button></span>`;
       } else if(req && req.status === 'pending' && req.recipient_id === currentUser.id){
         actionHtml = `<span style="display:flex;gap:4px;"><button class="esi-request-btn accept" data-accept="${esc(req.id)}">Accept</button><button class="esi-request-btn deny" data-deny="${esc(req.id)}">Deny</button></span>`;
       } else if(req && req.status === 'denied'){
-        actionHtml = '<span class="esi-muted" style="font-size:11px;">Declined</span>';
+        // The person who declined can change their mind; the sender just sees "Declined".
+        actionHtml = req.recipient_id === currentUser.id
+          ? `<button class="esi-request-btn accept" data-accept="${esc(req.id)}">Accept</button>`
+          : '<span class="esi-muted" style="font-size:11px;">Declined</span>';
       } else {
         actionHtml = `<button class="esi-request-btn" data-req="${esc(u.user_id)}">Request</button>`;
       }
@@ -369,7 +390,7 @@
     }).join(''):'<p class="esi-muted">No opted-in members found yet.</p>');
 
     dest.querySelectorAll('[data-peer]').forEach(el=>{
-      const go=()=>{ const peer = directoryCache.find(u=>u.user_id===el.dataset.peer); if(peer) openChat(dmChat(peer)); };
+      const go=()=>{ const peer = findPerson(el.dataset.peer); if(peer) openChat(dmChat(peer)); };
       el.onclick=go;
       el.onkeydown=e=>{ if((e.key==='Enter'||e.key===' ')&&e.target===el){ e.preventDefault(); go(); } };
     });
@@ -410,6 +431,19 @@
         status('Request declined.','esi-success');
       }catch(err){ status(err.message); }
     });
+    // Cancel a pending request / remove an existing connection (deletes the request row, so either side can start fresh later).
+    const dropRequest = async (id, msg) => {
+      try{
+        const {data,error} = await supabase.from('chat_requests').delete().eq('id', id).select('id');
+        if(error) throw error;
+        if(!data || !data.length) throw new Error('Could not remove this. The database needs a policy allowing members to delete their own chat requests.');
+        await loadRequests();
+        renderList();
+        status(msg,'esi-success');
+      }catch(err){ status(err.message); }
+    };
+    dest.querySelectorAll('[data-cancel]').forEach(btn=>btn.onclick=(e)=>{ e.stopPropagation(); dropRequest(btn.dataset.cancel,'Request cancelled.'); });
+    dest.querySelectorAll('[data-disconnect]').forEach(btn=>btn.onclick=(e)=>{ e.stopPropagation(); if(confirm('Remove this connection? You will both need a new request to chat again.')) dropRequest(btn.dataset.disconnect,'Connection removed.'); });
   }
   async function showDirectorySettings(){
     const {data:p,error}=await supabase.from('profiles').select('username,display_name,is_listed').eq('user_id',currentUser.id).single();if(error){status(error.message);return;}
@@ -536,6 +570,7 @@
     input.addEventListener('input',()=>sendTyping(input.value.trim().length>0));
     body.querySelector('#esi-compose').onsubmit=async e=>{
       e.preventDefault(); const message=input.value.trim(); if(!message||loading) return;
+      if(!isGroup && !isConnected(chat.id)){ status('You are not connected with this member.'); return; }
       loading=true; sendTyping(false);
       try{
         const row = isGroup ? {group_id:chat.id,sender_id:currentUser.id,body:message} : {sender_id:currentUser.id,recipient_id:chat.id,body:message};
@@ -598,6 +633,8 @@
         box.querySelectorAll('[data-reply]').forEach(btn => btn.onclick = () => startReply(btn.dataset.reply, chat));
         box.querySelectorAll('[data-react]').forEach(btn => btn.onclick = () => addReaction(btn.dataset.react, chat));
         loadReactions(box, chat);
+        // Touch screens have no hover: tap a message to show its action buttons.
+        box.querySelectorAll('.esi-bubble').forEach(b=>b.addEventListener('click',e=>{ if(e.target.closest('button')) return; b.classList.toggle('esi-show-actions'); }));
         if(first){
           const d=box.querySelector('#esi-unread-divider');
           if(d) box.scrollTop+=d.getBoundingClientRect().top-box.getBoundingClientRect().top-8;   // land on the first unread message
