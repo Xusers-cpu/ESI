@@ -147,3 +147,15 @@
 .esi-pick:hover{background:#f2f7fa}
 .esi-pick input{margin:0}
 .esi-btn.esi-danger{background:#fdecea;color:#b42318}
+
+/* Custom in-panel dialogs (replace native prompt/confirm) */
+.esi-dialog-overlay{position:absolute;inset:0;background:rgba(16,36,61,.45);display:flex;align-items:center;justify-content:center;z-index:20;border-radius:inherit;}
+.esi-dialog{background:#fff;border:1px solid #dfe6ee;border-radius:16px;padding:18px 18px 14px;width:min(300px,92%);box-shadow:0 12px 40px #10243d40;max-height:80%;overflow:auto;}
+.esi-dialog-title{font-weight:800;font-size:15px;margin-bottom:8px;color:#172033;}
+.esi-dialog-msg{font-size:13px;color:#667085;line-height:1.45;margin-bottom:12px;}
+.esi-dialog .esi-field{margin:0 0 12px;}
+.esi-dialog-actions{display:flex;gap:8px;justify-content:flex-end;}
+#esi-chat-root.esi-dark .esi-dialog{background:#1e293b;border-color:#334155;color:#e5e7eb;}
+#esi-chat-root.esi-dark .esi-dialog-title{color:#e5e7eb;}
+#esi-chat-root.esi-dark .esi-dialog-msg{color:#94a3b8;}
+#esi-chat-root.esi-dark .esi-dialog-overlay{background:rgba(0,0,0,.55);}
