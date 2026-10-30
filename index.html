@@ -5,7 +5,25 @@
   <meta name="description" content="Experimental Science Institution: Notes — a CBSE Class 9–10 science learning portal.">
   <title>Experimental Science Institution: Notes</title>
   <link rel="stylesheet" href="style.css">
-<link rel="stylesheet" href="chat-widget.css"></head>
+  <link rel="stylesheet" href="chat-widget.css">
+
+  <!-- Favicon -->
+  <link rel="icon" href="/ESI/icon-192.png" type="image/png">
+  <link rel="shortcut icon" href="/ESI/icon-192.png" type="image/png">
+
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="/ESI/manifest.json">
+
+  <!-- Theme and mobile web app capable -->
+  <meta name="theme-color" content="#173b60">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="ESI Notes">
+
+  <!-- Apple touch icon -->
+  <link rel="apple-touch-icon" href="/ESI/icon-192.png">
+</head>
 <body data-page="home">
   <div id="site-header"></div>
   <main>
@@ -47,4 +65,19 @@
   </main>
   <div id="site-footer"></div>
   <script src="app.js"></script>
+
+  <!-- Service Worker registration -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/ESI/sw.js', { scope: '/ESI/' })
+          .then((registration) => {
+            console.log('Service Worker registered with scope:', registration.scope);
+          })
+          .catch((error) => {
+            console.error('Service Worker registration failed:', error);
+          });
+      });
+    }
+  </script>
 </body></html>
